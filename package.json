@@ -1,0 +1,75 @@
+{
+  "name": "@codepress/design-kit",
+  "version": "0.2.0",
+  "description": "Capture your Storybook and real app pages as a static design kit, and compose self-contained mockups from it",
+  "type": "module",
+  "bin": {
+    "design-kit": "bin/design-kit.mjs"
+  },
+  "main": "./src/index.mjs",
+  "types": "./src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "default": "./src/index.mjs"
+    },
+    "./kit": {
+      "types": "./src/kit.d.ts",
+      "default": "./src/kit.mjs"
+    },
+    "./schema.json": "./schema/design-kit.config.schema.json",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "schema/",
+    "skills/",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "TZ=UTC LC_ALL=en_US.UTF-8 node --test test/*.test.mjs",
+    "test:browser": "node --test test/browser/*.test.mjs",
+    "lint": "oxlint --ignore-pattern 'test/fixtures/**' .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "pack:check": "node scripts/check-pack.mjs"
+  },
+  "peerDependencies": {
+    "@playwright/test": ">=1.40.0"
+  },
+  "peerDependenciesMeta": {
+    "@playwright/test": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@playwright/test": "1.58.2",
+    "oxlint": "^1.51.0",
+    "prettier": "^3.8.1"
+  },
+  "keywords": [
+    "design-kit",
+    "storybook",
+    "mockups",
+    "playwright",
+    "design-system"
+  ],
+  "author": "CodePress",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/quantfive/design-kit.git"
+  },
+  "homepage": "https://github.com/quantfive/design-kit#readme",
+  "bugs": {
+    "url": "https://github.com/quantfive/design-kit/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

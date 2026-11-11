@@ -1,0 +1,17 @@
+{
+  "name": "design-kit-storybook-fixture",
+  "private": true,
+  "type": "module",
+  "description": "A minimal React + Vite Storybook (no CodePress code, data-theme theming) whose static build, in ./build, the package's browser tests capture. Rebuild with ./build.sh.",
+  "scripts": {
+    "build-storybook": "storybook build --quiet --disable-telemetry -o build"
+  },
+  "devDependencies": {
+    "@storybook/react": "8.6.18",
+    "@storybook/react-vite": "8.6.18",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "storybook": "8.6.18",
+    "vite": "6.3.5"
+  }
+}

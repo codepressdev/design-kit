@@ -1,0 +1,11 @@
+{
+  "kit_version": 1,
+  "sha": "0123456789abcdef0123456789abcdef01234567",
+  "built_at": "2026-11-03T00:00:00.000Z",
+  "counts": {
+    "stories": 38,
+    "routes": 1,
+    "failed": 0
+  },
+  "sources": {}
+}

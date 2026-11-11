@@ -1,0 +1,24 @@
+<div id="storybook-root">
+  <button type="button" onclick="steal()">Open</button>
+</div>
+<div
+  role="dialog"
+  data-state="open"
+  class="dialog"
+  style="background-image: url(&quot;https://cdn.example.com/x.png&quot;)"
+>
+  <h2>Dialog body</h2>
+  <img src="https://avatars.example.com/u/1.png" alt="avatar" /><a
+    href="https://github.com/quantfive"
+    >GitHub</a
+  ><a href="//cdn.example.com/x">proto</a
+  ><iframe srcdoc="&lt;script&gt;alert(1)&lt;/script&gt;"></iframe>
+  <script>
+    alert("x");
+  </script>
+  <link rel="stylesheet" href="https://cdn.example.com/x.css" /><style>
+    .dialog {
+      background: url(http://cdn.example.com/y.png);
+    }
+  </style>
+</div>

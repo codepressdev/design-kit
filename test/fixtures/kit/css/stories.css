@@ -1,0 +1,13 @@
+@font-face {
+  font-family: "Geist";
+  font-weight: 100 900;
+  src: url("../fonts/geist-latin.9b6f5ff4.woff2") format("woff2");
+}
+@import url("https://fonts.googleapis.com/css2?family=Inter");
+.icon-rail {
+  display: flex;
+  background: url("https://cdn.example.com/rail.png");
+}
+.story-only {
+  color: blue;
+}

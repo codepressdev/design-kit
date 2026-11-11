@@ -1,0 +1,335 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://unpkg.com/@codepress/design-kit/schema/design-kit.config.schema.json",
+  "title": "design-kit.config.json",
+  "description": "Version 1 of the @codepress/design-kit configuration. Paths are relative to the folder that holds the config file.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version"],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "The schema an editor validates this file against."
+    },
+    "version": {
+      "type": "integer",
+      "enum": [1],
+      "description": "The config format version. Always 1."
+    },
+    "out": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Where captures write the kit when --out is not given."
+    },
+    "theme": { "$ref": "#/$defs/theme" },
+    "stories": { "$ref": "#/$defs/stories" },
+    "pages": { "$ref": "#/$defs/pages" }
+  },
+  "$defs": {
+    "size": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["width", "height"],
+      "properties": {
+        "width": { "type": "integer", "minimum": 1 },
+        "height": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "theme": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "How the app switches to its dark theme. Recorded in the kit's manifest, so `kit compose --theme dark` needs no config.",
+      "properties": {
+        "attribute": {
+          "type": "string",
+          "minLength": 1,
+          "description": "\"class\" (default) toggles a class; any other value is an attribute, such as \"data-theme\"."
+        },
+        "dark": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The class or attribute value for dark. Default \"dark\"."
+        },
+        "light": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The class or attribute value for light. Leave it out when light is the dark value's absence."
+        },
+        "targets": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "enum": ["html", "body"] },
+          "description": "The elements that carry the value. Default [\"html\", \"body\"] for a class, [\"html\"] for an attribute."
+        }
+      }
+    },
+    "stories": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "`design-kit capture stories`: every story of a Storybook 7 or 8 static build.",
+      "properties": {
+        "root": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The Storybook project folder (where its .storybook folder is). Default \".\"."
+        },
+        "storybookDir": {
+          "type": "string",
+          "minLength": 1,
+          "description": "An existing static build to capture. --storybook-dir overrides it."
+        },
+        "buildCommand": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Builds the static Storybook, run in `root`. `{out}` is replaced by a temporary folder when `staticDir` is not set."
+        },
+        "staticDir": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Where `buildCommand` writes the build (for example storybook-static)."
+        },
+        "viewport": {
+          "$ref": "#/$defs/size",
+          "description": "Every story's first capture, unless it declares parameters.viewport.defaultViewport. Default 1280x800."
+        },
+        "widths": {
+          "type": "array",
+          "description": "More captures for stories whose title matches `titles`.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["titles", "width", "height"],
+            "properties": {
+              "titles": {
+                "type": "string",
+                "minLength": 1,
+                "description": "A regular expression tested against the story's title, such as \"^(Pages|Layout)/\"."
+              },
+              "width": { "type": "integer", "minimum": 1 },
+              "height": { "type": "integer", "minimum": 1 }
+            }
+          }
+        },
+        "fonts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["dir", "faces"],
+          "description": "Faces every story is given. Without it, the @font-face files the Storybook build serves are copied into the kit.",
+          "properties": {
+            "dir": {
+              "type": "string",
+              "minLength": 1,
+              "description": "The folder that holds the font files."
+            },
+            "faces": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["family", "file"],
+                "properties": {
+                  "family": { "type": "string", "minLength": 1 },
+                  "file": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "A file name glob in `dir`, such as \"inter-latin.*.woff2\"; the first match in sorted order is used."
+                  },
+                  "weight": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "The font-weight descriptor, such as \"400\" or \"100 900\"."
+                  },
+                  "style": { "type": "string", "minLength": 1 },
+                  "variable": {
+                    "type": "string",
+                    "pattern": "^--[A-Za-z0-9_-]+$",
+                    "description": "A CSS variable on :root set to this family, for apps that read their font from one."
+                  },
+                  "fallback": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "The fallback list after the family in `variable`."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "fixedTime": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The instant every story reads from Date (ISO 8601). Default 2026-01-01T12:00:00.000Z."
+        },
+        "gaps": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["componentGlob"],
+          "description": "Lists component files that no story covers in gaps.json.",
+          "properties": {
+            "sourceRoot": {
+              "type": "string",
+              "minLength": 1,
+              "description": "The folder to scan. Default `root`."
+            },
+            "componentGlob": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Component files, as a glob relative to `root`, such as \"src/**/[A-Z]*.tsx\". Stories, tests and specs never count."
+            }
+          }
+        }
+      }
+    },
+    "slots": {
+      "type": "object",
+      "required": ["main"],
+      "description": "Replaceable regions, by name: the first selector that matches a visible, non-empty element marks it with data-kit-slot. `main` is required.",
+      "properties": {
+        "main": { "$ref": "#/$defs/selectors" }
+      },
+      "additionalProperties": { "$ref": "#/$defs/selectors" }
+    },
+    "selectors": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "page": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "path", "ready", "slots"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]*$",
+          "description": "The page's id in the kit: route:<name>@<width>."
+        },
+        "title": { "type": "string", "minLength": 1 },
+        "path": {
+          "type": "string",
+          "pattern": "^/",
+          "description": "The URL path, from baseUrl."
+        },
+        "ready": {
+          "type": "string",
+          "minLength": 1,
+          "description": "A Playwright selector that is visible once the page has rendered its content."
+        },
+        "sourceFile": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The page's source module, shown by `kit show` and searched by `kit find`."
+        },
+        "slots": { "$ref": "#/$defs/slots" },
+        "layoutSlots": {
+          "type": "object",
+          "description": "Slots for a layout the detector reports, replacing `slots` there.",
+          "additionalProperties": { "$ref": "#/$defs/slots" }
+        }
+      }
+    },
+    "pages": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pages"],
+      "description": "`design-kit capture pages`: real pages of the running app, through Playwright.",
+      "properties": {
+        "baseUrl": {
+          "type": "string",
+          "pattern": "^https?://",
+          "description": "The running app. Without it, `startCommand` starts the app and `waitUrl` says when it serves."
+        },
+        "startCommand": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Starts the app (run in `cwd`); it is stopped when the capture ends."
+        },
+        "waitUrl": {
+          "type": "string",
+          "pattern": "^https?://",
+          "description": "Polled until it answers; its origin is the base URL unless baseUrl is set."
+        },
+        "cwd": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Where `startCommand` runs. Default the config's folder."
+        },
+        "startTimeoutMs": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "How long `waitUrl` may take to answer. Default 120000."
+        },
+        "auth": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Signs the browser in: a Playwright storageState file, or a setup module whose default export returns one.",
+          "properties": {
+            "storageState": { "type": "string", "minLength": 1 },
+            "setup": { "type": "string", "minLength": 1 }
+          }
+        },
+        "hooks": {
+          "type": "string",
+          "minLength": 1,
+          "description": "A module exporting optional `context(context, info)` and `page(page, info)` hooks."
+        },
+        "widths": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/size" },
+          "description": "Every page is captured at each size. Default 1280x800 and 390x844."
+        },
+        "fixedTime": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The instant every page reads from Date (ISO 8601). Default 2026-01-01T12:00:00.000Z."
+        },
+        "shellReady": {
+          "type": "string",
+          "minLength": 1,
+          "description": "A selector the app's frame shows before any page content."
+        },
+        "layout": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["selector", "attribute"],
+          "description": "Reads the layout the app chose (an attribute of one element), which picks `layoutSlots`.",
+          "properties": {
+            "selector": { "type": "string", "minLength": 1 },
+            "attribute": { "type": "string", "minLength": 1 },
+            "default": {
+              "type": "string",
+              "minLength": 1,
+              "description": "The layout when the attribute is absent. Default \"default\"."
+            }
+          }
+        },
+        "fontsPath": {
+          "type": "string",
+          "pattern": "^/",
+          "description": "The app's font URL path, such as \"/fonts/\". Without it, any .woff2/.woff/.ttf/.otf URL is a font."
+        },
+        "copyFonts": {
+          "type": "boolean",
+          "description": "Copy the fonts the pages load into the kit's fonts folder. Default true."
+        },
+        "timeoutMs": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "How long a page may take to show its ready selector. Default 30000."
+        },
+        "forbidStrings": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "description": "Values that must never reach the kit, such as a test account's token. A page whose output holds one, as written or escaped, is not written."
+        },
+        "pages": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/page" }
+        }
+      }
+    }
+  }
+}

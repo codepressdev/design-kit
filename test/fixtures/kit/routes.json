@@ -1,0 +1,23 @@
+[
+  {
+    "id": "route:orchestrator@1280",
+    "kind": "route",
+    "title": "Orchestrator",
+    "file": "html/route--orchestrator@1280.html",
+    "width": 1280,
+    "height": 800,
+    "bytes": 194,
+    "slots": ["main", "rail"],
+    "path": "/orchestrator",
+    "body_class": "font-sans antialiased",
+    "html_attrs": {
+      "class": "geist light",
+      "style": "color-scheme: light",
+      "lang": "en"
+    },
+    "body_attrs": {
+      "class": "bg-background",
+      "style": "background: url(https://cdn.example.com/bg.png)"
+    }
+  }
+]
