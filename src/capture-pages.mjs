@@ -330,9 +330,12 @@ async function capturePage(context, page, viewport, run) {
         requestAnimationFrame(() => requestAnimationFrame(resolve)),
       );
     });
+    // A page's path may carry a query (`?tab=settings`), which the app may
+    // rewrite; only a different pathname is a redirect.
     const finalPath = new URL(tab.url()).pathname;
-    if (finalPath !== page.path)
-      throw new Error(`redirected from ${page.path} to ${finalPath}`);
+    const wantPath = new URL(page.path, baseUrl).pathname;
+    if (finalPath !== wantPath)
+      throw new Error(`redirected from ${wantPath} to ${finalPath}`);
 
     // The serialized DOM keeps no scroll, so neither does the screenshot.
     await tab.evaluate(() => {

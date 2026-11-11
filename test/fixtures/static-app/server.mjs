@@ -1,7 +1,7 @@
 /**
  * A signed-in app for the page capture test: `node server.mjs <port>`.
  * Pages need the `session=ok` cookie (from the test's storageState file),
- * otherwise they redirect to /login.
+ * otherwise they redirect to /login. /moved always redirects to /.
  */
 import { createServer } from "node:http";
 
@@ -34,6 +34,9 @@ const TYPES = { css: "text/css", svg: "image/svg+xml", woff2: "font/woff2" };
 createServer((request, response) => {
   const { pathname } = new URL(request.url, "http://x");
   const signedIn = /(?:^|;\s*)session=ok\b/.test(request.headers.cookie ?? "");
+  // A page that moved: the capture records it as a redirect.
+  if (pathname === "/moved")
+    return response.writeHead(302, { location: "/" }).end();
   if (!(pathname in routes)) return response.writeHead(404).end();
   const ext = pathname.split(".").pop();
   if (!(ext in TYPES) && pathname !== "/login" && !signedIn) {

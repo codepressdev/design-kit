@@ -244,6 +244,34 @@ test("capture pages signs in from storageState and marks the main slot", async (
   assert.ok(existsSync(join(out, "kit.mjs")));
 });
 
+test("a path's query is not a redirect, and a page that redirects is a gap", async () => {
+  const out = join(scratch, "redirect-kit");
+  const config = pagesConfig("redirect", await freePort(), [
+    { name: "tabbed", path: "/?tab=settings" },
+    { name: "moved", path: "/moved" },
+  ]);
+  const result = await cli([
+    "capture",
+    "pages",
+    "--config",
+    config,
+    "--out",
+    out,
+  ]);
+  assert.equal(result.code, 0, result.output);
+  assert.deepEqual(
+    readJson(join(out, "routes.json")).map((row) => [row.id, row.path]),
+    [
+      ["route:tabbed@1280", "/?tab=settings"],
+      ["route:tabbed@390", "/?tab=settings"],
+    ],
+  );
+  const gaps = readJson(join(out, "gaps.json"));
+  assert.equal(gaps.length, 2, JSON.stringify(gaps));
+  for (const gap of gaps)
+    assert.match(JSON.stringify(gap), /redirected from \/moved to \//);
+});
+
 test("a page whose markup carries a forbidStrings value fails the capture and writes nothing", async () => {
   const out = join(scratch, "leaky-kit");
   const config = pagesConfig("leaky", await freePort(), [
