@@ -1,5 +1,11 @@
 # @codepress/design-kit
 
+## 0.5.0
+
+### Minor Changes
+
+- 2691fe7: Design kit: page sources. A `pages.source` name lets two configs capture pages into one kit without erasing each other: a capture rewrites only its own source's frames, rows and gap rows, writes its stylesheet to `css/routes--<source>.css`, and fails with exit 2 naming both sources when a page name is already captured by another. Page hooks can return `beforeReady`, which runs once the shell shows and before the page's ready selector. Terminal's own windows (workspace, Settings, an Orchestrator project) are now captured into CodePress's kit with `pnpm design-kit:pages`; nothing in Terminal's app changes.
+
 ## 0.4.2
 
 ### Patch Changes
