@@ -1,5 +1,11 @@
 # @codepress/design-kit
 
+## 0.9.0
+
+### Minor Changes
+
+- 674255c: Choose where your design kit is stored. A new `storage` key in `design-kit.config.json` picks `github` (the default, unchanged: a GitHub Actions artifact), `codepress` (CodePress keeps the newest kit of each branch, and the workflow signs in with its GitHub OIDC token, so you add no secret), or your own bucket: `s3` for AWS S3, or `r2` for Cloudflare R2, which needs only your account id and bucket name. New commands work the same with every store: `design-kit upload --dir <kit>`, `design-kit fetch` (downloads the newest kit once per commit and prints `path=`, `sha=` and `branch=`) and `design-kit latest` (prints `sha=` and `created=`). `ci-check` finds the newest kit through the same lookup. `init --storage <type>` writes the matching config key and workflow, and `init --workflow-only --force --storage <type>` switches a repository that is already set up. The skill that `init` installs now fetches kits with `design-kit fetch`. Configs without `storage` generate exactly the same workflow as before. If you add `storage` by hand, also bump the pinned package version, because older versions reject the key.
+
 ## 0.8.0
 
 ### Minor Changes
