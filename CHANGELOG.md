@@ -1,5 +1,11 @@
 # @codepress/design-kit
 
+## 0.4.2
+
+### Patch Changes
+
+- 9a7fc21: `capture stories` holds each stylesheet's rules once instead of once per kept capture, so a full single-process capture of a large Storybook no longer runs out of heap. The kit output is unchanged.
+
 ## 0.4.1
 
 ### Patch Changes

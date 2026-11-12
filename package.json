@@ -1,6 +1,6 @@
 {
   "name": "@codepress/design-kit",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Capture your Storybook and real app pages as a static design kit, and compose self-contained mockups from it",
   "type": "module",
   "bin": {
