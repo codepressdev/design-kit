@@ -1,5 +1,16 @@
 # @codepress/design-kit
 
+## 0.4.0
+
+### Minor Changes
+
+- 2c07aa2: The workflow `design-kit init` writes now rebuilds the kit only when your UI changed, and keeps kits three times longer.
+  - **Rebuilds only when the UI changed.** `design-kit.config.json` has a new, optional `watch` list: the folders and files, relative to the repository root, whose change rebuilds the kit. `init` fills it in with your Storybook and app folders, the workspace packages they depend on (where shared UI usually lives in a monorepo), global styles and tokens, the config, the lockfile and the workflow. A pages-only repository gets the app folder and its workspace dependencies. The daily run compares the git ids of those paths at the newest kit's commit and now, and stops after a few seconds when none changed, without installing dependencies, Chromium or Storybook. The run's summary says why it built or skipped.
+  - **Kits last 90 days and never expire unreplaced.** Kits are kept 90 days, the most a public repository allows (a private one may raise `retention-days` to 400). The kit is rebuilt at least every 75 days (`DESIGN_KIT_MAX_AGE_DAYS`), and after each upload the older kits on the branch are deleted. A failed delete is a warning, never a failed run.
+  - **New commands** behind the workflow: `design-kit ci-check` prints `build=true|false` and the reason, and `design-kit ci-cleanup --keep <artifact id>` deletes older kits.
+  - **Update an existing setup** with `npx @codepress/design-kit@latest init --workflow-only --force`. It rewrites only the workflow and prints the `watch` list to add to your config. Workflows you already have keep running unchanged until you do.
+  - The installed `design-kit` skill now reads `watch` from the config when it counts the UI commits since a kit, so its caption matches what triggers a rebuild.
+
 ## 0.3.0
 
 ### Minor Changes
