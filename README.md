@@ -468,7 +468,11 @@ by id, title, component and source file only.
 `compose` writes one self-contained page: the frame's markup with slots
 filled and every `<kit-snippet id="…">` expanded, its CSS inlined, every
 relative `url()` that names a file in the kit (fonts included) as a data URI,
-and `data-kit-sha`/`data-kit-id` on `<html>`. Scripts, event handlers,
+and `data-kit-sha`/`data-kit-id` on `<html>`. Each expanded snippet's
+top-level elements carry `data-kit-snippet="<id>"`, and a
+`<meta name="design-kit-usage">` in the head holds a JSON record of the kit sha,
+the frame, the snippet ids and how many `data-kit-new` elements the page has.
+The record stays in the page: `kit.mjs` makes no network call. Scripts, event handlers,
 `<link>`s and SVG animation are removed, and URLs pass an allowlist: only
 relative references, fragments and `data:` survive, read the way the browser
 reads them. `--theme dark` applies the manifest's theme. Elements marked

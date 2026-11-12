@@ -123,6 +123,127 @@ test("compose fills a route slot, expands snippets from both sources and stays s
   assert.doesNotMatch(page, /\[data-kit-new\]\{outline/);
 });
 
+/** The page's design-kit-usage meta, decoded. */
+function usageMeta(page) {
+  const match =
+    /<meta name="design-kit-usage" content="([^"]*)">/.exec(page) ?? [];
+  assert.ok(match[1], "the page carries a design-kit-usage meta");
+  return JSON.parse(match[1].replace(/&quot;/g, '"').replace(/&amp;/g, "&"));
+}
+
+test("compose stamps each expanded snippet's roots and records what the page used", () => {
+  const slot = scratchFile(
+    "usage-main.html",
+    `<section data-kit-new>New panel<span data-kit-new>badge</span></section>
+<kit-snippet id="story:primitives-dialog--open@1280"></kit-snippet>
+<div data-kit-new>Second new part</div>
+<kit-snippet id="story:primitives-dialog--open@1280"></kit-snippet>`,
+  );
+  const page = composeToString([
+    "--frame",
+    "route:orchestrator@1280",
+    "--slot",
+    `main=${slot}`,
+  ]);
+
+  // The rail's <nav> and both top-level parts of each dialog (its trigger and
+  // its portal) carry the id of the snippet they came from.
+  assert.match(
+    page,
+    /<nav data-kit-snippet="story:shell-iconrail--default@1280" class="icon-rail"/,
+  );
+  const dialogRoots = [
+    ...page.matchAll(
+      /<(\w+) data-kit-snippet="story:primitives-dialog--open@1280"/g,
+    ),
+  ].map((m) => m[1]);
+  assert.deepEqual(dialogRoots, ["button", "div", "button", "div"]);
+  // Nested elements inside a snippet are not stamped.
+  assert.doesNotMatch(page, /<h2 data-kit-snippet/);
+
+  assert.deepEqual(usageMeta(page), {
+    kit_sha: "0123456789abcdef0123456789abcdef01234567",
+    frame: "route:orchestrator@1280",
+    snippets: [
+      "story:shell-iconrail--default@1280",
+      "story:primitives-dialog--open@1280",
+    ],
+    new_parts: 3,
+  });
+
+  // A frame with nothing hand-drawn and no slot still records its own snippets.
+  const today = composeToString(["--frame", "route:orchestrator@1280"]);
+  assert.deepEqual(usageMeta(today), {
+    kit_sha: "0123456789abcdef0123456789abcdef01234567",
+    frame: "route:orchestrator@1280",
+    snippets: ["story:shell-iconrail--default@1280"],
+    new_parts: 0,
+  });
+});
+
+test("kit.mjs makes no network call in any command", async () => {
+  // Every way Node reaches the network funnels through one of these; while
+  // they throw, any attempt fails the command and this test.
+  const net = await import("node:net");
+  const dns = await import("node:dns");
+  const http = await import("node:http");
+  const https = await import("node:https");
+  const { syncBuiltinESMExports } = await import("node:module");
+  const attempts = [];
+  const refuse = (what) => () => {
+    attempts.push(what);
+    throw new Error(`network disallowed: ${what}`);
+  };
+  const saved = [
+    [net.Socket.prototype, "connect"],
+    [net.default, "connect"],
+    [net.default, "createConnection"],
+    [dns.default, "lookup"],
+    [dns.default.promises, "lookup"],
+    [http.default, "request"],
+    [http.default, "get"],
+    [https.default, "request"],
+    [https.default, "get"],
+    [globalThis, "fetch"],
+  ].map(([target, key]) => [target, key, target[key]]);
+  for (const [target, key] of saved) target[key] = refuse(key);
+  syncBuiltinESMExports();
+  try {
+    const slot = scratchFile(
+      "offline.html",
+      `<div data-kit-new>New</div><kit-snippet id="story:primitives-dialog--open@1280"></kit-snippet>`,
+    );
+    for (const args of [
+      ["info"],
+      ["find", "dialog"],
+      ["show", "route:orchestrator@1280"],
+      ["show", "story:primitives-dialog--open@1280", "--full"],
+      [
+        "compose",
+        "--frame",
+        "route:orchestrator@1280",
+        "--slot",
+        `main=${slot}`,
+        "--out",
+        scratchFile("offline-page.html"),
+      ],
+      [
+        "compose",
+        "--frame",
+        "route:nope@1280",
+        "--out",
+        scratchFile("never.html"),
+      ],
+    ]) {
+      kit(args);
+    }
+  } finally {
+    for (const [target, key, value] of saved) target[key] = value;
+    syncBuiltinESMExports();
+  }
+  assert.deepEqual(attempts, []);
+});
+
 test("--show-new outlines new content and --theme dark sets dark on html and body", () => {
   const page = composeToString([
     "--frame",

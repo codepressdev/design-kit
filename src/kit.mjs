@@ -711,7 +711,30 @@ export function inlineAssets(kit, css, cssDir = join(kit.dir, "css")) {
 
 // ── compose ─────────────────────────────────────────────────────────────────
 
-function expandSnippets(kit, html, used, budget, depth = 0) {
+/**
+ * `data-kit-snippet="<id>"` on each top-level element of a snippet's markup,
+ * so the composed page records which real piece every part came from. A
+ * nested `<kit-snippet>` at the top is left alone: its own expansion stamps
+ * the elements that replace it.
+ */
+function stampSnippetRoots(html, id) {
+  const roots = elements(html).filter(
+    (e) =>
+      e.depth === 0 &&
+      e.name !== "kit-snippet" &&
+      !("data-kit-snippet" in e.attrs),
+  );
+  let out = "";
+  let i = 0;
+  for (const root of roots) {
+    const at = root.start + 1 + root.name.length;
+    out += `${html.slice(i, at)} data-kit-snippet="${escapeAttr(id)}"`;
+    i = at;
+  }
+  return out + html.slice(i);
+}
+
+function expandSnippets(kit, html, used, budget, depth = 0, ids = []) {
   const found = elements(html).filter((e) => e.name === "kit-snippet");
   if (!found.length) return html;
   if (depth >= SNIPPET_DEPTH) {
@@ -735,9 +758,17 @@ function expandSnippets(kit, html, used, budget, depth = 0) {
       );
     }
     if (rowSource(row) === "stories") markup = unwrapStoryRoot(markup);
+    if (!ids.includes(row.id)) ids.push(row.id);
     out +=
       html.slice(i, element.start) +
-      expandSnippets(kit, markup, used, budget, depth + 1);
+      expandSnippets(
+        kit,
+        stampSnippetRoots(markup, row.id),
+        used,
+        budget,
+        depth + 1,
+        ids,
+      );
     i = element.end;
   }
   return out + html.slice(i);
@@ -874,10 +905,17 @@ export function compose(
   }
   const used = new Set([rowCssFile(kit, row)]);
   const filled = fillSlots(kit, row, readSnippet(kit, row), slots);
-  const body = expandSnippets(kit, filled, used, {
-    left: maxBytes - filled.length,
-    max: maxBytes,
-  });
+  const snippetIds = [];
+  const body = sanitizeMarkup(
+    expandSnippets(
+      kit,
+      filled,
+      used,
+      { left: maxBytes - filled.length, max: maxBytes },
+      0,
+      snippetIds,
+    ),
+  );
 
   // Stories' sheet first, then the route sheets, as before page sources.
   const storiesCss = cssFile(kit, "stories");
@@ -912,18 +950,27 @@ export function compose(
     "body",
     {},
   );
+  // What this page used, for whoever wants to count it later. Recorded in
+  // the page only; kit.mjs never sends it anywhere.
+  const usage = {
+    kit_sha: sha,
+    frame,
+    snippets: snippetIds,
+    new_parts: elements(body).filter((e) => "data-kit-new" in e.attrs).length,
+  };
   const page = `<!doctype html>
 <html${htmlAttrs}>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="design-kit-usage" content="${escapeAttr(JSON.stringify(usage))}">
 <title>${escapeAttr(row.title ?? frame)}</title>
 <style>
 ${sanitizeCss(css)}${showNewCss}
 </style>
 </head>
 <body${bodyAttrs}>
-${sanitizeMarkup(body)}
+${body}
 </body>
 </html>
 `;
