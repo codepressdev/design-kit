@@ -63,11 +63,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/quantfive/design-kit.git"
+    "url": "git+https://github.com/codepressdev/design-kit.git"
   },
-  "homepage": "https://github.com/quantfive/design-kit#readme",
+  "homepage": "https://github.com/codepressdev/design-kit#readme",
   "bugs": {
-    "url": "https://github.com/quantfive/design-kit/issues"
+    "url": "https://github.com/codepressdev/design-kit/issues"
   },
   "publishConfig": {
     "access": "public"

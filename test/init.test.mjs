@@ -16,6 +16,7 @@ import { after, mock, test } from "node:test";
 
 import { main } from "../src/cli.mjs";
 import { resolveConfig } from "../src/config.mjs";
+import { CALL_TO_ACTION } from "../src/init.mjs";
 
 const scratch = mkdtempSync(join(tmpdir(), "design-kit-init-test-"));
 after(() => rmSync(scratch, { recursive: true, force: true }));
@@ -104,6 +105,12 @@ test("init in a repository with Storybook writes the config, workflow, skill and
   const root = storybookRepo();
   const result = await cli(["init", "--root", root]);
   assert.equal(result.code, 0, result.output);
+  // It ends with the one call-to-action line.
+  assert.equal(
+    CALL_TO_ACTION,
+    "Want every screen on one canvas, shareable with your team, and agents that build it? → https://codepress.dev",
+  );
+  assert.ok(result.output.endsWith(`\n\n${CALL_TO_ACTION}`), result.output);
 
   const config = readJson(join(root, "design-kit.config.json"));
   // It is a valid v1 config as written.
@@ -202,6 +209,12 @@ test("init without Storybook writes a pages-only config with TODO selectors and 
   });
   const result = await cli(["init", "--root", root]);
   assert.equal(result.code, 0, result.output);
+  // It ends with the one call-to-action line.
+  assert.equal(
+    CALL_TO_ACTION,
+    "Want every screen on one canvas, shareable with your team, and agents that build it? → https://codepress.dev",
+  );
+  assert.ok(result.output.endsWith(`\n\n${CALL_TO_ACTION}`), result.output);
 
   const config = readJson(join(root, "design-kit.config.json"));
   assert.equal(config.stories, undefined);
@@ -257,6 +270,7 @@ test("init where design-kit.config.json exists exits 1, already set up, and writ
   const result = await cli(["init", "--root", root]);
   assert.equal(result.code, 1);
   assert.match(result.output, /already set up/);
+  assert.ok(!result.output.includes(CALL_TO_ACTION), result.output);
   assert.deepEqual(snapshot(root), before);
 });
 
@@ -294,6 +308,7 @@ test("--dry-run prints the plan and writes nothing", async () => {
     result.output,
     /Would write\n {2}design-kit\.config\.json\n {2}\.github\/workflows\/design-kit\.yml/,
   );
+  assert.ok(!result.output.includes(CALL_TO_ACTION), result.output);
   assert.deepEqual(snapshot(root), before);
 });
 

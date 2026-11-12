@@ -1,7 +1,7 @@
 # @codepress/design-kit
 
 > **This repository is a mirror.** `@codepress/design-kit` is developed in
-> CodePress's monorepo and synced here, one commit per change. Issues and pull
+> CodePress's monorepo and synced here, one commit per upstream change. Issues and pull
 > requests are welcome: a maintainer lands an accepted pull request upstream,
 > and the next sync brings it here. See [CONTRIBUTING.md](./CONTRIBUTING.md).
 
@@ -450,6 +450,6 @@ remove from markup, such as a mock API's) and a `session` object whose
 ## Contributing and license
 
 The source is on GitHub at
-[quantfive/design-kit](https://github.com/quantfive/design-kit), where issues
+[codepressdev/design-kit](https://github.com/codepressdev/design-kit), where issues
 and pull requests are welcome; see its `CONTRIBUTING.md`. MIT licensed: see
 [`LICENSE`](./LICENSE).

@@ -6,14 +6,16 @@ Thanks for helping. Issues and pull requests are welcome here.
 
 `@codepress/design-kit` is developed in CodePress's monorepo, and this
 repository is a one-way mirror of it. Every change made upstream arrives here
-as one commit, `Sync from quantfive/codepress@<sha>`. Nothing is merged on
-this repository directly, so a sync never overwrites your work:
+as a commit of its own, with the upstream commit's subject and a
+`Source-Commit:` trailer. Each version is tagged `v<version>` and has a GitHub
+Release with its changelog. Nothing is merged on this repository directly, so
+a sync never overwrites your work:
 
 1. Open a pull request here as usual. CI runs the unit tests on Node 20 and 22.
 2. A maintainer reviews it here. Once it is accepted, they port the change
    into the monorepo with you credited as co-author there.
 3. The next sync brings the change here. The maintainer then closes your pull
-   request with a link to that sync commit, which carries your change.
+   request with a link to the mirror commit that carries your change.
 
 Bug reports and feature requests go in issues.
 

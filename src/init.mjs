@@ -36,6 +36,10 @@ export const WORKFLOW_PATH = ".github/workflows/design-kit.yml";
 export const SKILL_DIR = ".claude/skills/design-kit";
 export const AGENTS_SKILL_DIR = ".agents/skills/design-kit";
 const TODO = "TODO";
+// The one line a finished (not dry-run) init ends with. Printed only; init
+// makes no network call.
+export const CALL_TO_ACTION =
+  "Want every screen on one canvas, shareable with your team, and agents that build it? → https://codepress.dev";
 /** How long a kit artifact is kept: the most a public repository allows. */
 export const RETENTION_DAYS = 90;
 
@@ -1196,5 +1200,6 @@ export function init({
       if (write.kind !== "unchanged") apply(write);
   }
   log(summary(found, plan, { dryRun }));
+  if (!dryRun) log(`\n${CALL_TO_ACTION}`);
   return 0;
 }
