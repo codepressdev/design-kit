@@ -21,6 +21,16 @@
       "minLength": 1,
       "description": "Where captures write the kit when --out is not given."
     },
+    "watch": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^(?![/\\\\])(?!.*(^|/)\\.\\.(/|$))(?!.*[*?\\[])",
+        "description": "A folder or file, relative to the repository root (not to this file): no leading slash, no .., no glob."
+      },
+      "description": "The paths whose change rebuilds the kit in CI (`design-kit ci-check`), relative to the repository root. A run where none of them changed since the newest kit's commit builds nothing. Without it, any change in the repository rebuilds. `init` writes the Storybook and app folders, the workspace packages they use, global styles, this file, the lockfile and the workflow."
+    },
     "theme": { "$ref": "#/$defs/theme" },
     "stories": { "$ref": "#/$defs/stories" },
     "pages": { "$ref": "#/$defs/pages" }

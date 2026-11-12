@@ -27,7 +27,8 @@ const USAGE = `usage: design-kit <command> [options]
 
   init              set a kit up in this repository: the config, a daily
                     GitHub Actions build, and a skill for its agents
-      [--root <dir>] [--dry-run] [--force]
+      [--root <dir>] [--dry-run] [--force] [--workflow-only]
+                    --workflow-only --force rewrites just the workflow
   capture stories   capture every story of a Storybook 7-9 static build
       [--config <file>] [--out <dir>] [--storybook-dir <dir>]
       [--only <id,...> | --only-file <file>] [--base <previous kit>]
@@ -39,6 +40,15 @@ const USAGE = `usage: design-kit <command> [options]
       [--kit <dir>]   default: DESIGN_KIT_DIR, the config's "out", ./design-kit
   validate          check design-kit.config.json against the v1 schema
       [--config <file>]
+  ci-check          in CI: print build=true|false and the reason. Builds
+                    when a "watch" path changed since the newest kit, there
+                    is no kit, it is DESIGN_KIT_MAX_AGE_DAYS (75) old, or
+                    --force or --package is given
+      [--config <file>] [--since <sha> --kit-created <iso> | --no-kit]
+      [--force] [--package <spec>] [--max-age-days <n>]
+      [--repo <owner/name>] [--branch <name>]
+  ci-cleanup        in CI: delete the branch's kits older than --keep
+      --keep <artifact id> [--repo <owner/name>] [--branch <name>]
   setup-guide       print the guide for setting a kit up in a repository as
                     one reviewable pull request (an agent skill)
   storybook-guide   print the guide for adding Storybook, with stories for
@@ -179,13 +189,39 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
         root: "value",
         "dry-run": "flag",
         force: "flag",
+        "workflow-only": "flag",
       });
       const { init } = await import("./init.mjs");
       return init({
         root: options.root ?? ".",
         dryRun: Boolean(options["dry-run"]),
         force: Boolean(options.force),
+        workflowOnly: Boolean(options["workflow-only"]),
       });
+    }
+    if (command === "ci-check") {
+      const options = parse(argv.slice(1), {
+        config: "value",
+        since: "value",
+        "kit-created": "value",
+        "no-kit": "flag",
+        force: "flag",
+        package: "value",
+        "max-age-days": "value",
+        repo: "value",
+        branch: "value",
+      });
+      const { ciCheckCommand } = await import("./ci.mjs");
+      return ciCheckCommand(options, { env });
+    }
+    if (command === "ci-cleanup") {
+      const options = parse(argv.slice(1), {
+        keep: "value",
+        repo: "value",
+        branch: "value",
+      });
+      const { ciCleanupCommand } = await import("./ci.mjs");
+      return ciCleanupCommand(options, { env });
     }
     if (command === "setup-guide") {
       parse(argv.slice(1), {});

@@ -25,9 +25,10 @@ is missing from every kit until it gets one.
 ## 1. Fetch the newest kit
 
 The workflow runs once a day and on demand (`workflow_dispatch`), and uploads
-the `design-kit` artifact (kept 30 days). A day with no new commits skips and
-uploads nothing, yet still succeeds, so look up the newest artifact rather than
-the newest run, then download it once per kit commit:
+the `design-kit` artifact (kept 90 days; older kits are deleted). A day when
+none of the config's `watch` paths changed skips and uploads nothing, yet
+still succeeds, so look up the newest artifact rather than the newest run,
+then download it once per kit commit:
 
 ```bash
 REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
@@ -51,11 +52,15 @@ working files in a scratch folder, never in the repository.
 ## 2. Check staleness
 
 The kit is a snapshot of `manifest.sha`, up to a day behind. Check whether UI
-code changed since:
+code changed since, over the same `watch` paths that make the workflow
+rebuild (read from the config, so the two always agree):
 
 ```bash
 KIT_SHA=$(node -p 'require(process.argv[1]).sha' "$KIT/manifest.json")
-git fetch -q origin "$BRANCH" && git log --oneline "$KIT_SHA..origin/$BRANCH" -- {{WATCHED_PATHS}}
+TOP=$(git rev-parse --show-toplevel)
+git fetch -q origin "$BRANCH" &&
+  node -e 'const w = require(process.argv[1]).watch; process.stdout.write((w?.length ? w : ["."]).map((p) => `:(top)${p}`).join("\0"))' "$TOP/{{CONFIG}}" |
+  xargs -0 git log --oneline "$KIT_SHA..origin/$BRANCH" --
 ```
 
 When the list is not empty, say so on the mockup: "Kit from `<sha7>`; N UI

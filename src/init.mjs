@@ -2,9 +2,10 @@
  * `design-kit init`: sets a design kit up in a repository. It looks at the
  * project (Storybook, framework, package manager, dev script, Playwright,
  * theme) and writes design-kit.config.json, a daily GitHub Actions workflow
- * that uploads the kit, a design-kit skill for the repository's agents and
- * one line in AGENTS.md or CLAUDE.md. It never overwrites a file without
- * --force and never writes a secret.
+ * that rebuilds the kit when the watched UI files change and uploads it, a
+ * design-kit skill for the repository's agents and one line in AGENTS.md or
+ * CLAUDE.md. It never overwrites a file without --force and never writes a
+ * secret. `--workflow-only` rewrites just the workflow.
  */
 import {
   existsSync,
@@ -20,6 +21,7 @@ import {
 } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 
+import { DEFAULT_MAX_AGE_DAYS } from "./ci.mjs";
 import { CONFIG_NAME } from "./config.mjs";
 
 const PACKAGE = JSON.parse(
@@ -34,6 +36,8 @@ export const WORKFLOW_PATH = ".github/workflows/design-kit.yml";
 export const SKILL_DIR = ".claude/skills/design-kit";
 export const AGENTS_SKILL_DIR = ".agents/skills/design-kit";
 const TODO = "TODO";
+/** How long a kit artifact is kept: the most a public repository allows. */
+export const RETENTION_DAYS = 90;
 
 const IGNORED_DIRS = new Set([
   "node_modules",
@@ -549,12 +553,117 @@ function posix(path) {
   return path.split(sep).join("/");
 }
 
+/** Folders at a package root that hold what the UI renders or loads. */
+const ROOT_UI_DIRS = new Set([
+  ".storybook",
+  "app",
+  "assets",
+  "components",
+  "design-tokens",
+  "lib",
+  "pages",
+  "public",
+  "src",
+  "stories",
+  "styles",
+  "theme",
+  "tokens",
+]);
+/** Global styles and tokens that can sit at the repository root. */
+const ROOT_STYLE_DIRS = new Set(["design-tokens", "styles", "theme", "tokens"]);
+const UI_CONFIG_FILE =
+  /^(tailwind|postcss|vite|next|astro|remix|svelte|nuxt|uno|panda)\.config\.[cm]?[jt]s$/;
+
+/**
+ * What to watch for one package folder: the folder itself, or, when the
+ * package is the repository root, its UI folders and config files (watching
+ * the whole root would rebuild on every commit).
+ */
+function packageWatch(dir, repoRoot) {
+  if (dir !== repoRoot) return [posix(relative(repoRoot, dir))];
+  const paths = [];
+  for (const entry of safeReaddir(dir)) {
+    if (entry.isDirectory() && ROOT_UI_DIRS.has(entry.name))
+      paths.push(entry.name);
+    else if (
+      entry.isFile() &&
+      (UI_CONFIG_FILE.test(entry.name) ||
+        entry.name === "package.json" ||
+        entry.name === "index.html")
+    )
+      paths.push(entry.name);
+  }
+  return paths.sort();
+}
+
+/** The workspace packages `dirs` depend on, directly or through each other. */
+function workspaceDependencies(dirs, found) {
+  const all = [
+    ...new Set([...workspacePackages(found.repoRoot), ...found.workspaces]),
+  ];
+  const byName = new Map();
+  for (const dir of all) {
+    const name = readJson(join(dir, "package.json"))?.name;
+    if (name && !byName.has(name)) byName.set(name, dir);
+  }
+  const seen = new Set(dirs);
+  const queue = [...dirs];
+  const dependencies = [];
+  while (queue.length) {
+    const dir = queue.shift();
+    for (const name of Object.keys(deps(readJson(join(dir, "package.json"))))) {
+      const dep = byName.get(name);
+      if (dep && !seen.has(dep)) {
+        seen.add(dep);
+        dependencies.push(dep);
+        queue.push(dep);
+      }
+    }
+  }
+  return dependencies;
+}
+
+/**
+ * The config's `watch` list: the paths, relative to the repository root,
+ * whose change rebuilds the kit. The Storybook and app folders, the
+ * workspace packages they depend on (shared UI usually lives there), global
+ * styles and tokens at the root, the config, the lockfile and the workflow.
+ */
+export function watchDefaults(found) {
+  const rel = (path) => posix(relative(found.repoRoot, path));
+  const roots = [
+    ...(found.storybook ? [found.storybook.dir] : []),
+    found.framework?.dir ?? found.project,
+  ];
+  const packages = [...new Set(roots)];
+  const paths = [];
+  for (const dir of [...packages, ...workspaceDependencies(packages, found)])
+    paths.push(...packageWatch(dir, found.repoRoot));
+  for (const entry of safeReaddir(found.repoRoot))
+    if (
+      (entry.isDirectory() && ROOT_STYLE_DIRS.has(entry.name)) ||
+      (entry.isFile() && UI_CONFIG_FILE.test(entry.name))
+    )
+      paths.push(entry.name);
+  paths.push(rel(join(found.project, CONFIG_NAME)));
+  const pm = found.packageManager;
+  if (pm.lockfile) paths.push(rel(join(pm.installDir, pm.lockfile)));
+  paths.push(WORKFLOW_PATH);
+  const unique = [...new Set(paths.filter(Boolean))];
+  // A path inside another watched folder adds nothing.
+  return unique.filter(
+    (path) =>
+      !unique.some((other) => other !== path && path.startsWith(`${other}/`)),
+  );
+}
+
 /** design-kit.config.json, as an object. */
 export function buildConfig(found) {
   const config = {
     $schema: `https://unpkg.com/${PACKAGE.name}@${PACKAGE.version}/schema/design-kit.config.schema.json`,
     version: 1,
     out: "design-kit",
+    watch: watchDefaults(found),
     theme: {
       attribute: found.theme.attribute,
       dark: found.theme.dark,
@@ -634,13 +743,18 @@ export function buildWorkflow(found) {
 
   return `name: Design kit
 
-# Captures this repository's design kit once a day: ${found.storybook ? "every Storybook story and " : ""}the
-# pages listed in ${at(CONFIG_NAME)}, as static HTML with the CSS and fonts
-# they load. It uploads the result as the \`design-kit\` artifact (kept 30
-# days), which agents download to draw mockups from the app's real markup.
-# A day with no new commits since the newest kit builds nothing.
+# Captures this repository's design kit: ${found.storybook ? "every Storybook story and " : ""}the pages
+# listed in ${at(CONFIG_NAME)}, as static HTML with the CSS and fonts they
+# load. It uploads the result as the \`design-kit\` artifact, which agents
+# download to draw mockups from the app's real markup.
 #
-# Written by \`design-kit init\` (${PACKAGE.name}). Edit it freely.
+# It runs daily, but builds only when a path in the config's "watch" list
+# changed since the newest kit's commit, when there is no kit yet, or when
+# the newest kit is DESIGN_KIT_MAX_AGE_DAYS old, so a kit never expires
+# unreplaced. After an upload it deletes the branch's older kits.
+#
+# Written by \`design-kit init\` (${PACKAGE.name}); \`init --workflow-only
+# --force\` rewrites just this file. Edit it freely.
 
 on:
   schedule:
@@ -648,11 +762,11 @@ on:
   workflow_dispatch:
     inputs:
       force:
-        description: Build even when the newest kit is from this commit
+        description: Build even when no watched file changed since the newest kit
         type: boolean
         default: false
       package:
-        description: "The ${PACKAGE.name} to install, as an npm package spec (default: the pinned version below)"
+        description: "The ${PACKAGE.name} to build with, as an npm package spec (default: the pinned version below). Always builds."
         type: string
         default: ""
 
@@ -667,30 +781,46 @@ env:
   DESIGN_KIT_PACKAGE: "${PACKAGE.name}@${PACKAGE.version}"
   PLAYWRIGHT_PACKAGE: "@playwright/test@${playwrightPin()}"
   CONFIG: \${{ github.workspace }}/${at(CONFIG_NAME)}
+  # Rebuild a kit this many days old even with no UI change. Kits are kept
+  # ${RETENTION_DAYS} days (retention-days below), so this refreshes the kit before it
+  # expires.
+  DESIGN_KIT_MAX_AGE_DAYS: "${DEFAULT_MAX_AGE_DAYS}"
 
 jobs:
   check:
-    name: Any commits since the newest kit?
+    name: Did the watched files change?
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     permissions:
+      contents: read
       actions: read
     outputs:
-      build: \${{ steps.last.outputs.build }}
+      build: \${{ steps.check.outputs.build }}
     steps:
-      - id: last
+      # Only the config is checked out and no file contents are fetched: the
+      # check compares the git tree and blob ids of the watched paths at the
+      # newest kit's commit and at this one.
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+          filter: blob:none
+          sparse-checkout: ${at(CONFIG_NAME)}
+          sparse-checkout-cone-mode: false
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - id: check
         env:
           GH_TOKEN: \${{ github.token }}
           FORCE: \${{ inputs.force || 'false' }}
+          PACKAGE_INPUT: \${{ inputs.package || '' }}
         run: |
-          last=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=design-kit&per_page=100" \\
-            --jq "[.artifacts[] | select((.expired | not) and .workflow_run.head_branch == \\"$GITHUB_REF_NAME\\")] | sort_by(.created_at) | last | .workflow_run.head_sha // \\"\\"") || last=""
-          if [ "$FORCE" != "true" ] && [ -n "$last" ] && [ "$last" = "$GITHUB_SHA" ]; then
-            echo "The newest design kit is from $GITHUB_SHA and there are no commits since: nothing to build." | tee -a "$GITHUB_STEP_SUMMARY"
-            echo "build=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "build=true" >> "$GITHUB_OUTPUT"
-          fi
+          args=()
+          if [ "$FORCE" = "true" ]; then args+=(--force); fi
+          if [ -n "$PACKAGE_INPUT" ]; then args+=(--package "$PACKAGE_INPUT"); fi
+          npx --yes -p "$DESIGN_KIT_PACKAGE" design-kit ci-check --config "$CONFIG" "\${args[@]}"
 
   build:
     name: Build the design kit
@@ -698,6 +828,8 @@ jobs:
     if: needs.check.outputs.build == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    outputs:
+      artifact-id: \${{ steps.upload.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -745,13 +877,37 @@ ${storiesStep}
         run: |
           echo "::warning title=Design kit::Nothing to capture yet, so no kit was uploaded: ${at(CONFIG_NAME)} has no stories and its pages still have ${TODO} settings. Fill in the pages (or add Storybook) and run this workflow again."
 
-      - if: hashFiles('${at("design-kit")}/manifest.json') != ''
+      - id: upload
+        if: hashFiles('${at("design-kit")}/manifest.json') != ''
         uses: actions/upload-artifact@v5
         with:
           name: design-kit
           path: ${at("design-kit")}
-          retention-days: 30
+          # The most a public repository allows. A private repository may
+          # raise it to 400 (and DESIGN_KIT_MAX_AGE_DAYS with it).
+          retention-days: ${RETENTION_DAYS}
           if-no-files-found: error
+
+  # Deletes this branch's older kits once the new one is uploaded. The only
+  # job that may delete artifacts; a failed delete is a warning.
+  cleanup:
+    name: Delete older kits
+    needs: build
+    if: needs.build.outputs.artifact-id != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - continue-on-error: true
+        env:
+          GH_TOKEN: \${{ github.token }}
+          KEEP: \${{ needs.build.outputs.artifact-id }}
+        run: npx --yes -p "$DESIGN_KIT_PACKAGE" design-kit ci-cleanup --keep "$KEEP"
 `;
 }
 
@@ -759,19 +915,11 @@ ${storiesStep}
 export function buildSkill(found) {
   const pm = found.packageManager;
   const projectDir = posix(relative(found.repoRoot, found.project)) || ".";
-  const watched = found.storybook
-    ? [...new Set([found.storybook.dir, found.framework?.dir ?? found.project])]
-    : [found.framework?.dir ?? found.project];
-  const watchedPaths =
-    watched
-      .map((dir) => posix(relative(found.repoRoot, dir)) || ".")
-      .join(" ") || ".";
   const cli = `npx --yes -p ${PACKAGE.name}@${PACKAGE.version} -p @playwright/test@${playwrightPin()} design-kit`;
   const values = {
     CLI: cli,
     CONFIG: projectDir === "." ? CONFIG_NAME : `${projectDir}/${CONFIG_NAME}`,
     PROJECT_DIR: projectDir,
-    WATCHED_PATHS: watchedPaths,
     STORIES_LINE: found.storybook
       ? `$DK capture stories --config "$CONFIG" --out "$KIT"   # builds Storybook first`
       : `# (no Storybook: this kit has pages only)`,
@@ -902,6 +1050,7 @@ function describe(found) {
         ? `${found.playwright.name}${found.playwright.version ? ` ${found.playwright.version}` : ""}`
         : "none (the workflow installs its own)",
     ],
+    ["Rebuilds on", watchDefaults(found).join(", ")],
     [
       "Theme",
       found.theme.evidence
@@ -942,10 +1091,10 @@ function todo(found) {
   return items;
 }
 
-function summary(found, plan, { dryRun }) {
+function summary(found, plan, { dryRun, workflowOnly, notes }) {
   const rel = (path) => posix(relative(found.repoRoot, path)) || ".";
   const lines = [
-    `design-kit init${dryRun ? " --dry-run" : ""}: ${found.project}`,
+    `design-kit init${workflowOnly ? " --workflow-only" : ""}${dryRun ? " --dry-run" : ""}: ${found.project}`,
     "",
     "Found",
   ];
@@ -968,24 +1117,58 @@ function summary(found, plan, { dryRun }) {
     lines.push(`  ${rel(write.path)}${note}`);
   }
   lines.push("", "Still to decide");
-  for (const item of todo(found)) lines.push(`  - ${item}`);
+  for (const item of notes ?? todo(found)) lines.push(`  - ${item}`);
   return lines.join("\n");
 }
 
 // ── the command ─────────────────────────────────────────────────────────────
 
 /**
+ * `init --workflow-only`: rewrites .github/workflows/design-kit.yml from
+ * this version and nothing else. The config is left alone; when it has no
+ * `watch` list, the summary prints the one init would write.
+ */
+function initWorkflowOnly(found, { dryRun, force, log }) {
+  const configFile = join(found.project, CONFIG_NAME);
+  if (!exists(configFile))
+    throw new InitError(
+      `${configFile} does not exist, so there is no kit to build yet. Run init without --workflow-only.`,
+    );
+  const path = join(found.repoRoot, WORKFLOW_PATH);
+  if (!force && exists(path))
+    throw new InitError(
+      `${WORKFLOW_PATH} already exists. Nothing was written; pass --force with --workflow-only to replace it.`,
+    );
+  const plan = {
+    writes: [{ path, kind: "file", content: buildWorkflow(found) }],
+  };
+  if (!dryRun) apply(plan.writes[0]);
+  const notes = [];
+  const raw = readJson(configFile);
+  if (!Array.isArray(raw?.watch) || !raw.watch.length)
+    notes.push(
+      `${CONFIG_NAME} has no "watch" list, so the kit rebuilds after any commit. To rebuild only when the UI changes, add:\n    "watch": ${JSON.stringify(watchDefaults(found))}`,
+    );
+  else notes.push(`Nothing: ${CONFIG_NAME} already has a "watch" list.`);
+  log(summary(found, plan, { dryRun, workflowOnly: true, notes }));
+  return 0;
+}
+
+/**
  * Runs init. Options: `root` (the project folder, default the working
- * directory), `dryRun`, `force`, `log`. Returns the exit code: 0 done, 1
- * already set up or another file in the way.
+ * directory), `dryRun`, `force`, `workflowOnly` (write just the workflow, for
+ * a repository set up by an older version), `log`. Returns the exit code: 0
+ * done, 1 already set up or another file in the way.
  */
 export function init({
   root = ".",
   dryRun = false,
   force = false,
+  workflowOnly = false,
   log = console.log,
 } = {}) {
   const found = detectProject(root);
+  if (workflowOnly) return initWorkflowOnly(found, { dryRun, force, log });
   const plan = planInit(found);
   if (!force) {
     const config = join(found.project, CONFIG_NAME);

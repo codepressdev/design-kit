@@ -139,3 +139,21 @@ test("--help prints the usage from any command, without reading a config", async
   }
   assert.match(logs.join("\n"), /capture stories/);
 });
+
+test("watch takes repository paths and refuses an absolute path, .. or a glob", () => {
+  const config = (watch) => ({
+    version: 1,
+    watch,
+    pages: { baseUrl: "http://localhost:3000", pages: [page()] },
+  });
+  assert.deepEqual(
+    validate(config(["src", "packages/ui", ".storybook", "pnpm-lock.yaml"])),
+    [],
+  );
+  assert.deepEqual(
+    validate(config(["/src", "../shared", "src/*.css"])).map((e) =>
+      e.replace(/ must match .*/, ""),
+    ),
+    ["watch[0]:", "watch[1]:", "watch[2]:"],
+  );
+});

@@ -68,6 +68,17 @@ async function cli(args) {
 
 const readJson = (file) => JSON.parse(readFileSync(file, "utf8"));
 
+/** The workflow's jobs, by name, as text. */
+function jobsOf(workflow) {
+  const body = workflow.slice(workflow.indexOf("\njobs:\n") + 7);
+  const jobs = {};
+  for (const part of body.split(/\n(?= {2}[a-z-]+:\n)/)) {
+    const name = part.match(/^ {2}([a-z-]+):/)?.[1];
+    if (name) jobs[name] = part;
+  }
+  return jobs;
+}
+
 const storybookRepo = () =>
   repo({
     "package.json": {
@@ -121,10 +132,34 @@ test("init in a repository with Storybook writes the config, workflow, skill and
   assert.match(workflow, /npx playwright install --with-deps chromium/);
   assert.match(workflow, /design-kit capture stories --config "\$CONFIG"/);
   assert.match(workflow, /design-kit capture pages --config "\$CONFIG"/);
+  assert.deepEqual(config.watch, [
+    ".storybook",
+    "package.json",
+    "src",
+    "design-kit.config.json",
+    "package-lock.json",
+    ".github/workflows/design-kit.yml",
+  ]);
+  const jobs = jobsOf(workflow);
+  assert.deepEqual(Object.keys(jobs), ["check", "build", "cleanup"]);
   assert.match(
-    workflow,
-    /name: design-kit\n\s+path: design-kit\n\s+retention-days: 30/,
+    jobs.build,
+    /name: design-kit\n\s+path: design-kit\n(\s+#.*\n)*\s+retention-days: 90\n/,
   );
+  assert.match(jobs.build, /# .*private repository may\n.*raise it to 400/);
+  // Deleting artifacts is allowed in the cleanup job only.
+  assert.match(jobs.cleanup, /permissions:\n\s+actions: write\n/);
+  assert.match(jobs.cleanup, /needs: build\n/);
+  assert.match(jobs.cleanup, /continue-on-error: true/);
+  assert.match(jobs.cleanup, /design-kit ci-cleanup --keep "\$KEEP"/);
+  assert.match(
+    jobs.check,
+    /permissions:\n\s+contents: read\n\s+actions: read\n/,
+  );
+  assert.match(jobs.check, /design-kit ci-check --config "\$CONFIG"/);
+  assert.match(jobs.check, /sparse-checkout: design-kit\.config\.json\n/);
+  assert.doesNotMatch(workflow.replace(jobs.cleanup, ""), /actions: write/);
+  assert.match(workflow, /DESIGN_KIT_MAX_AGE_DAYS: "75"/);
   assert.match(
     workflow,
     /DESIGN_KIT_PACKAGE: "@codepress\/design-kit@\d+\.\d+\.\d+"/,
@@ -170,6 +205,14 @@ test("init without Storybook writes a pages-only config with TODO selectors and 
 
   const config = readJson(join(root, "design-kit.config.json"));
   assert.equal(config.stories, undefined);
+  // Pages only: the app's folders and config, plus the lockfile and workflow.
+  assert.deepEqual(config.watch, [
+    "app",
+    "package.json",
+    "design-kit.config.json",
+    "pnpm-lock.yaml",
+    ".github/workflows/design-kit.yml",
+  ]);
   assert.deepEqual(config.theme, { attribute: "data-theme", dark: "dark" });
   assert.equal(config.pages.startCommand, "pnpm run dev");
   assert.equal(config.pages.waitUrl, "http://localhost:3000/");
@@ -270,6 +313,11 @@ test("--root puts the config in the subpackage and the workflow, skill and line 
   assert.equal(result.code, 0, result.output);
   assert.ok(existsSync(join(root, "apps/web/design-kit.config.json")));
   assert.ok(!existsSync(join(root, "design-kit.config.json")));
+  // The config sits in apps/web, which is watched whole.
+  assert.deepEqual(
+    readJson(join(root, "apps/web/design-kit.config.json")).watch,
+    ["apps/web", "yarn.lock", ".github/workflows/design-kit.yml"],
+  );
 
   const workflow = readFileSync(
     join(root, ".github/workflows/design-kit.yml"),
@@ -324,4 +372,92 @@ test("nothing init writes names the vendor's internals or carries a secret", asy
       path,
     );
   }
+});
+
+test("in a workspace monorepo, watch holds the app and the shared UI package it uses, not unrelated packages", async () => {
+  const root = repo({
+    "package.json": {
+      name: "mono",
+      private: true,
+      packageManager: "pnpm@9.15.0",
+    },
+    "pnpm-workspace.yaml": "packages:\n  - apps/*\n  - packages/*\n",
+    "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
+    "tailwind.config.ts": "export default {};",
+    "styles/tokens.css": ":root { --brand: red; }",
+    "apps/web/package.json": {
+      name: "@mono/web",
+      scripts: { dev: "next dev" },
+      dependencies: { next: "15.0.0", "@mono/ui": "workspace:*" },
+    },
+    "packages/ui/package.json": {
+      name: "@mono/ui",
+      dependencies: { "@mono/tokens": "workspace:*" },
+    },
+    "packages/tokens/package.json": { name: "@mono/tokens" },
+    "packages/api/package.json": { name: "@mono/api" },
+  });
+  const result = await cli(["init", "--root", root]);
+  assert.equal(result.code, 0, result.output);
+  assert.deepEqual(readJson(join(root, "design-kit.config.json")).watch, [
+    "apps/web",
+    "packages/ui",
+    "packages/tokens",
+    "styles",
+    "tailwind.config.ts",
+    "design-kit.config.json",
+    "pnpm-lock.yaml",
+    ".github/workflows/design-kit.yml",
+  ]);
+  assert.match(
+    result.output,
+    /Rebuilds on\s+apps\/web, packages\/ui, packages\/tokens/,
+  );
+});
+
+test("init --workflow-only --force rewrites just the workflow and suggests a watch list", async () => {
+  const root = storybookRepo();
+  assert.equal((await cli(["init", "--root", root])).code, 0);
+  const config = join(root, "design-kit.config.json");
+  // An older setup: no watch list, an older workflow.
+  const old = readJson(config);
+  delete old.watch;
+  writeFileSync(config, JSON.stringify(old));
+  const workflow = join(root, ".github/workflows/design-kit.yml");
+  writeFileSync(workflow, "old workflow");
+  const before = snapshot(root);
+
+  const refused = await cli(["init", "--root", root, "--workflow-only"]);
+  assert.equal(refused.code, 1);
+  assert.match(refused.output, /pass --force with --workflow-only/);
+  assert.deepEqual(snapshot(root), before);
+
+  const result = await cli([
+    "init",
+    "--root",
+    root,
+    "--workflow-only",
+    "--force",
+  ]);
+  assert.equal(result.code, 0, result.output);
+  const after = snapshot(root);
+  for (const path of Object.keys(before))
+    if (path !== ".github/workflows/design-kit.yml")
+      assert.equal(after[path], before[path], path);
+  assert.match(readFileSync(workflow, "utf8"), /design-kit ci-check/);
+  assert.match(
+    result.output,
+    /Wrote\n {2}\.github\/workflows\/design-kit\.yml\n\n/,
+  );
+  assert.match(
+    result.output,
+    /has no "watch" list[\s\S]*"watch": \[".storybook","package.json","src"/,
+  );
+});
+
+test("init --workflow-only without a config says to run init", async () => {
+  const root = storybookRepo();
+  const result = await cli(["init", "--root", root, "--workflow-only"]);
+  assert.equal(result.code, 1);
+  assert.match(result.output, /Run init without --workflow-only/);
 });

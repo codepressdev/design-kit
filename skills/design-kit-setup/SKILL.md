@@ -28,11 +28,14 @@ npx --yes @codepress/design-kit init
 It detects Storybook and its version, the framework, the package manager, the
 dev script, Playwright and the dark-theme mechanism, then writes:
 
-- `design-kit.config.json`: the stories (when Storybook is found), a `pages`
-  skeleton with `TODO` selectors, and the theme;
-- `.github/workflows/design-kit.yml`: a daily build (and manual dispatch) that
-  skips when nothing was committed since the last kit, and uploads the
-  `design-kit` artifact for 30 days;
+- `design-kit.config.json`: the `watch` list (the UI folders, the workspace
+  packages the app uses, the lockfile and the workflow), the stories (when
+  Storybook is found), a `pages` skeleton with `TODO` selectors, and the
+  theme;
+- `.github/workflows/design-kit.yml`: a daily check (and manual dispatch) that
+  builds only when a `watch` path changed since the last kit or that kit is 75
+  days old, uploads the `design-kit` artifact for 90 days and deletes the
+  older ones. Check the `watch` list covers every folder the UI renders from;
 - `.claude/skills/design-kit/SKILL.md` and `.agents/skills/design-kit`: how
   agents fetch the kit, compose mockups and caption them;
 - one line in `AGENTS.md` (or `CLAUDE.md`) pointing at that skill.

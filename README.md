@@ -84,11 +84,19 @@ components, and draws only what is new.
 
 Nothing needs re-running after setup.
 
-- **It rebuilds itself.** The workflow `init` wrote
-  (`.github/workflows/design-kit.yml`) builds the kit every day, and on
-  demand from "Run workflow" in the Actions tab or with
-  `gh workflow run design-kit.yml`. A day with no new commits since the last
-  kit is skipped. Each kit is kept for 30 days.
+- **It rebuilds itself, only when the UI changed.** The workflow `init`
+  wrote (`.github/workflows/design-kit.yml`) checks every day, and on demand
+  from "Run workflow" in the Actions tab or with
+  `gh workflow run design-kit.yml`. It builds only when a path in the
+  config's `watch` list changed since the newest kit's commit, and at least
+  every 75 days (`DESIGN_KIT_MAX_AGE_DAYS` in the workflow) so the kit never
+  expires. Any other day it stops after a few seconds, and the run's summary
+  says why it built or skipped. "Run workflow" with `force` builds anyway.
+- **Kits are kept 90 days, and older ones deleted.** 90 days is the most a
+  public repository allows; a private one may raise `retention-days` in the
+  workflow to 400 (raise `DESIGN_KIT_MAX_AGE_DAYS` with it). After each
+  upload the workflow deletes the branch's older kits, so only the newest is
+  stored. A failed delete is a warning, never a failed run.
 - **It captures what exists at that commit.** Every build captures the
   stories and pages that exist at the commit it runs on. It never writes
   stories, so a new component shows up in the kit once it has a story. With
@@ -102,7 +110,46 @@ Nothing needs re-running after setup.
 - **Re-run `init` only to start over** (`--force`). To pick up a new release
   of this package, update the pinned version in the workflow
   (`DESIGN_KIT_PACKAGE`); the "Run workflow" form's `package` input tries
-  another version for one run.
+  another version for one run (and always builds).
+
+### What makes it rebuild: `watch`
+
+`watch` in `design-kit.config.json` lists the folders and files, relative to
+the repository root, whose change rebuilds the kit. `init` writes:
+
+- the Storybook folder and the app's folder (when either is the repository
+  root, its UI folders such as `src`, `app` and `.storybook` and files such
+  as `package.json` and `tailwind.config.ts`, since watching the whole root
+  would rebuild on every commit);
+- the workspace packages they depend on, directly or through each other,
+  since shared UI usually lives there in a monorepo;
+- global styles and tokens at the root (`styles`, `tokens`, `theme`, a
+  Tailwind or PostCSS config);
+- `design-kit.config.json` itself, the lockfile and the workflow.
+
+A pages-only repository (no Storybook) gets the app's folder and its
+workspace dependencies. Edit the list freely: add a folder the UI reads from
+(fixtures, a shared assets package), or drop one that changes often without
+changing what renders. Paths only, no globs. Without `watch`, any commit
+rebuilds. The installed `design-kit` skill reads the same list when it counts
+the UI commits since a kit, so its caption matches what triggers a rebuild.
+
+### Updating a setup made by an older version
+
+An older workflow keeps working as it is. To switch to the one above, run:
+
+```bash
+npx @codepress/design-kit@latest init --workflow-only --force
+```
+
+It rewrites only `.github/workflows/design-kit.yml`, at the new pinned
+version, and leaves the config, the skill and `AGENTS.md` alone. When the
+config has no `watch` list, it prints the one `init` would write; paste it
+into `design-kit.config.json`, or the kit rebuilds after any commit. If you
+edited the old workflow, copy the new `check` and `cleanup` jobs, the `id:
+upload` and `retention-days: 90` on the upload step, the build job's
+`artifact-id` output and `DESIGN_KIT_MAX_AGE_DAYS` into it instead. To
+refresh the skill as well, run `init --force`, which rewrites the config too.
 
 ## Set up in your repository
 
@@ -122,14 +169,18 @@ other), the package manager and lockfile, the dev or start script and the
 app's local URL, an existing Playwright, and whether the app switches to dark
 with a class or a `data-theme` attribute. Then it writes:
 
-- `design-kit.config.json`: the `stories` section when Storybook is found, a
-  `pages` section with `TODO` selectors to fill in, and the `theme`.
-- `.github/workflows/design-kit.yml`: a daily build (and `workflow_dispatch`)
-  on `ubuntu-latest`. It skips when there are no commits since the newest
-  `design-kit` artifact's commit; otherwise it installs dependencies, this
-  package at a pinned version and Chromium, builds Storybook and captures the
-  stories, captures the pages once no `TODO` is left in the config, and
-  uploads the `design-kit` artifact for 30 days. A run with nothing to
+- `design-kit.config.json`: the `watch` list, the `stories` section when
+  Storybook is found, a `pages` section with `TODO` selectors to fill in, and
+  the `theme`.
+- `.github/workflows/design-kit.yml`: a daily check (and `workflow_dispatch`)
+  on `ubuntu-latest`. A `check` job runs `design-kit ci-check`, which skips
+  when no `watch` path changed since the newest `design-kit` artifact's
+  commit and that kit is under 75 days old; otherwise the build installs
+  dependencies, this package at a pinned version and Chromium, builds
+  Storybook and captures the stories, captures the pages once no `TODO` is
+  left in the config, and uploads the `design-kit` artifact for 90 days. A
+  `cleanup` job, the only one allowed to delete artifacts, then runs
+  `design-kit ci-cleanup` to delete the branch's older kits. A run with nothing to
   capture yet (no stories, pages still `TODO`) ends with a warning and
   uploads nothing. The page capture gets
   `DESIGN_KIT_USERNAME` and `DESIGN_KIT_PASSWORD` from repository secrets for
@@ -249,16 +300,33 @@ value>]` then replaces `slots`.
 ## Commands
 
 ```bash
-design-kit init            [--root dir] [--dry-run] [--force]
+design-kit init            [--root dir] [--dry-run] [--force] [--workflow-only]
 design-kit capture stories [--config f] [--out dir] [--storybook-dir dir]
                            [--only id,... | --only-file f] [--base previous-kit]
 design-kit capture pages   [--config f] [--out dir] [--base-url url] [--only name,...]
                            [--ready name=selector] [--screenshots dir] [--timeout ms]
 design-kit kit info|find|show|compose ...   [--kit dir]
 design-kit validate        [--config f]
+design-kit ci-check        [--config f] [--since sha --kit-created iso | --no-kit]
+                           [--force] [--package spec] [--max-age-days n]
+design-kit ci-cleanup      --keep artifact-id
 design-kit setup-guide
 design-kit storybook-guide
 ```
+
+`ci-check` and `ci-cleanup` are the workflow's steps. `ci-check` finds the
+newest unexpired `design-kit` artifact on the branch (through `gh`, from
+`GITHUB_REPOSITORY` and `GITHUB_REF_NAME`, or `--repo` and `--branch`), or
+takes it from `--since` and `--kit-created`. It fetches that commit (shallow,
+no file contents) and compares the git tree or blob id of each `watch` path
+there and at `HEAD`; a missing path is a value of its own, so a deleted path
+counts as changed. It prints `build=true` or `build=false` and the reason
+(`changed: src`, `watched files unchanged since 3f2a9c1`, `refresh before
+expiry: …`, `no kit yet on this branch`, `forced …`, `an explicit package was
+given …`) and writes them to `$GITHUB_OUTPUT` and the step summary. A kit
+that cannot be looked up or fetched builds. `ci-cleanup` deletes the
+branch's kits older than `--keep` and warns about any it could not delete;
+both always exit 0 unless the config is invalid.
 
 `setup-guide` prints the agent skill for setting a kit up in a repository
 that has none, as one reviewable pull request: run `init`, decide between
