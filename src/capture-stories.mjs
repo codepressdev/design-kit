@@ -10,6 +10,7 @@
  * Needs Playwright's Chromium (`npx playwright install chromium`).
  */
 import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   copyFileSync,
   createReadStream,
@@ -61,6 +62,28 @@ export const kitId = (storyId, width) => `story:${storyId}@${width}`;
 /** File names carry no ':' (Actions artifacts reject it): `story--<id>@<w>`. */
 export const kitFile = (id) => `html/${id.replace(/^story:/, "story--")}.html`;
 export const storyIdOf = (id) => id.replace(/^story:/, "").replace(/@\d+$/, "");
+
+/**
+ * Holds each distinct sheet once. A capture's sheets come back as shared
+ * `{key, rules}` entries: an equal key and equal rules give the same entry,
+ * so a run keeps one copy of the CSS nearly every story loads instead of one
+ * per capture. A linked sheet is keyed by its path, so two captures can share
+ * a key with different rules; each keeps its own, and the kit chooses between
+ * them exactly as it did before.
+ */
+export function sheetStore() {
+  const byKey = new Map(); // key -> Map(rules digest -> entry)
+  return (sheets) =>
+    sheets.map(({ key, rules }) => {
+      const digest = createHash("sha256")
+        .update(JSON.stringify(rules))
+        .digest("base64");
+      let variants = byKey.get(key);
+      if (!variants) byKey.set(key, (variants = new Map()));
+      if (!variants.has(digest)) variants.set(digest, { key, rules });
+      return variants.get(digest);
+    });
+}
 
 /**
  * Sheets in a cascade-respecting order: each capture's sheets keep their
@@ -974,6 +997,15 @@ export async function captureStories(config, options = {}) {
     const captures = new Map(); // kit id -> {story, viewport, result}
     const failures = [];
     const attempts = []; // every capture's timing, kept or not
+    // Nearly every story loads the same sheets, a few hundred KB of rules
+    // each; kept results share one copy of each (see sheetStore).
+    const keepSheetsOnce = sheetStore();
+    // What the timings report needs from a capture, without its result.
+    const attempt = (capture) => {
+      const record = { timing: capture.timing, failure: capture.failure };
+      attempts.push(record);
+      return record;
+    };
     let done = 0;
     await pool(targets, concurrency, async (story) => {
       const first = await captureOne({
@@ -986,7 +1018,7 @@ export async function captureStories(config, options = {}) {
         families,
         fixedTime,
       });
-      attempts.push(first);
+      const firstAttempt = attempt(first);
       let viewports = plannedViewports(story.title, null, planning);
       const results = new Map([[planning.viewport.width, first]]);
       if (first.result) {
@@ -994,7 +1026,7 @@ export async function captureStories(config, options = {}) {
         viewports = plannedViewports(story.title, declared, planning);
         if (declared) {
           results.delete(planning.viewport.width);
-          first.discarded = true;
+          firstAttempt.discarded = true;
         }
       }
       for (const viewport of viewports) {
@@ -1009,7 +1041,7 @@ export async function captureStories(config, options = {}) {
             families,
             fixedTime,
           });
-          attempts.push(capture);
+          attempt(capture);
           results.set(viewport.width, capture);
         }
         const capture = results.get(viewport.width);
@@ -1017,7 +1049,14 @@ export async function captureStories(config, options = {}) {
         if (capture.failure) {
           failures.push({ id, ...capture.failure });
         } else {
-          captures.set(id, { story, viewport, result: capture.result });
+          captures.set(id, {
+            story,
+            viewport,
+            result: {
+              ...capture.result,
+              sheets: keepSheetsOnce(capture.result.sheets),
+            },
+          });
         }
       }
       done += 1;
