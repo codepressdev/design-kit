@@ -1,5 +1,11 @@
 # @codepress/design-kit
 
+## 0.4.1
+
+### Patch Changes
+
+- 7d2037e: The package's repository, homepage and issue links now point at `codepressdev/design-kit`, where the source is mirrored with one commit per upstream change and a tag and GitHub Release for every version. `design-kit init` now ends with one line about CodePress after it writes its files. It makes no network call, and the line is not printed on `--dry-run` or when the repository is already set up.
+
 ## 0.4.0
 
 ### Minor Changes
