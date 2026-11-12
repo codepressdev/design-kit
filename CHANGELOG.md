@@ -1,5 +1,11 @@
 # @codepress/design-kit
 
+## 0.8.0
+
+### Minor Changes
+
+- 65340b5: `compose` records what a page used, in the page only: each expanded `<kit-snippet>`'s top-level elements carry `data-kit-snippet="<id>"`, and a `<meta name="design-kit-usage">` in the head holds the kit sha, the frame, the snippet ids and the number of `data-kit-new` elements. Nothing else changes, and `kit.mjs` still makes no network call.
+
 ## 0.7.0
 
 ### Minor Changes
