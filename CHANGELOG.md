@@ -1,5 +1,11 @@
 # @codepress/design-kit
 
+## 0.6.0
+
+### Minor Changes
+
+- 5999430: Stories can list their own capture widths with `parameters.designKit.widths`, so a phone-only story is captured at phone width and left out at desktop width instead of failing there. A `// design-kit: no-story <reason>` comment marks a component file with nothing to show: its gap row has reason `exempt` and the reason as `detail`, instead of `no story`. Both are additive; `kit_version` stays 1. A story that holds the page's main thread, before or after it renders, is now a `timeout` gap instead of stalling the capture (a story that holds it only at a width it does not list is still captured at its own widths), and a second capture in the same process no longer reuses pages from the first one's closed browser.
+
 ## 0.5.0
 
 ### Minor Changes
