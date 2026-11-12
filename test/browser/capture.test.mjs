@@ -178,10 +178,11 @@ function signedInState() {
 }
 
 /** A pages config for the static app, with its token as a forbidden string. */
-function pagesConfig(name, port, pages) {
+function pagesConfig(name, port, pages, extra = {}) {
   return writeConfig(name, {
     version: 1,
     pages: {
+      ...extra,
       startCommand: `"${process.execPath}" "${join(fixture("static-app"), "server.mjs")}" ${port}`,
       waitUrl: `http://127.0.0.1:${port}/login`,
       auth: { storageState: signedInState() },
@@ -293,4 +294,65 @@ test("a page whose markup carries a forbidStrings value fails the capture and wr
   );
   // The clean page is not written either: the run leaves no kit to upload.
   assert.ok(!existsSync(out));
+});
+
+test("two sourced captures into one kit each rewrite only their own source's frames", async () => {
+  const out = join(scratch, "sources-kit");
+  const capture = async (source, pages) => {
+    const config = pagesConfig(`source-${source}`, await freePort(), pages, {
+      source,
+    });
+    const result = await cli([
+      "capture",
+      "pages",
+      "--config",
+      config,
+      "--out",
+      out,
+    ]);
+    assert.equal(result.code, 0, result.output);
+  };
+  const ids = () =>
+    readJson(join(out, "routes.json")).map((row) => [
+      row.id,
+      row.source,
+      row.css,
+    ]);
+
+  await capture("web", [{ name: "home", path: "/" }]);
+  // A page that redirects is a gap row, and it carries its source too.
+  await capture("terminal", [
+    { name: "terminal-home", path: "/?tab=settings" },
+    { name: "terminal-moved", path: "/moved" },
+  ]);
+  const terminalGaps = () =>
+    readJson(join(out, "gaps.json")).map((gap) => [gap.id, gap.source]);
+  const gaps = [
+    ["route:terminal-moved@1280", "terminal"],
+    ["route:terminal-moved@390", "terminal"],
+  ];
+  assert.deepEqual(terminalGaps(), gaps);
+  const both = [
+    ["route:home@1280", "web", "css/routes--web.css"],
+    ["route:home@390", "web", "css/routes--web.css"],
+    ["route:terminal-home@1280", "terminal", "css/routes--terminal.css"],
+    ["route:terminal-home@390", "terminal", "css/routes--terminal.css"],
+  ];
+  assert.deepEqual(ids(), both);
+  // And the reverse: web again leaves terminal's frames and sheet in place.
+  await capture("web", [{ name: "home", path: "/" }]);
+  assert.deepEqual(ids(), both);
+  assert.deepEqual(terminalGaps(), gaps);
+  for (const file of [
+    "html/route--terminal-home@1280.html",
+    "css/routes--terminal.css",
+    "css/routes--web.css",
+  ])
+    assert.ok(existsSync(join(out, file)), file);
+  assert.deepEqual(
+    Object.keys(
+      readJson(join(out, "manifest.json")).sources.routes.page_sources,
+    ).sort(),
+    ["terminal", "web"],
+  );
 });

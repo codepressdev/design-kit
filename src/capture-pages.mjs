@@ -32,9 +32,14 @@ import {
   kitRouteId,
   mergeGaps,
   mergeManifest,
+  mergeRoutes,
   normalizeReactIds,
+  ownsRouteRow,
   rewriteCssUrls,
+  routeCssFile,
+  routeRowPage,
   selectPages,
+  sourceCollisions,
 } from "./pages.mjs";
 import { ConfigError } from "./config.mjs";
 import { loadPlaywright } from "./playwright.mjs";
@@ -310,6 +315,9 @@ async function capturePage(context, page, viewport, run) {
         .first()
         .waitFor({ state: "visible" });
     }
+    // A page reached by a click or a key, not by its path alone (a settings
+    // panel, a drawer), gets there here.
+    await pageHooks.beforeReady?.();
     const ready = tab.locator(page.ready).first();
     try {
       await ready.waitFor({ state: "visible" });
@@ -367,6 +375,47 @@ function themeClassesOf(theme) {
 }
 
 /**
+ * Throws a ConfigError (exit 2) when a page the config declares is already in
+ * the kit at `out` (a routes.json row or a gaps.json page row) from another
+ * page source. Page names are unique across sources, and every declared page
+ * counts, whatever `--only` selects. `capturePages` calls it before starting
+ * anything; a harness that starts its own servers first can call it earlier.
+ *
+ * @param {object} config A loaded config (`loadConfig`).
+ * @param {string} out The kit folder.
+ */
+export function assertPageSources(config, out) {
+  const settings = config.pages;
+  if (!settings) return;
+  const source = settings.source ?? null;
+  const pageNames = new Set(settings.pages.map((page) => page.name));
+  const clashes = sourceCollisions(
+    [
+      ...asArray(readJson(path.join(out, "routes.json"))),
+      ...asArray(readJson(path.join(out, "gaps.json"))),
+    ],
+    { source, pageNames },
+  );
+  if (clashes.length) {
+    throw new ConfigError(
+      clashes
+        .map(
+          ({ name, other }) =>
+            `page "${name}" is declared by page source "${source}" (${config.file}) and source "${other}" already captured it into ${out}; page names must be unique across sources`,
+        )
+        .join("\n"),
+    );
+  }
+}
+
+/** A page's markup carries a forbidStrings value. */
+class ForbiddenStringError extends Error {
+  constructor() {
+    super("the page's markup carries a forbidStrings value");
+  }
+}
+
+/**
  * Captures the configured pages into `out`.
  *
  * Options (all optional except what the config leaves out): `out`, `only`
@@ -382,13 +431,6 @@ function themeClassesOf(theme) {
  * Returns 0, or 130 when interrupted (nothing is written then). Throws,
  * writing nothing, when any page's markup carries a forbidStrings value.
  */
-/** A page's markup carries a forbidStrings value. */
-class ForbiddenStringError extends Error {
-  constructor() {
-    super("the page's markup carries a forbidStrings value");
-  }
-}
-
 export async function capturePages(config, options = {}) {
   const settings = config.pages;
   if (!settings) {
@@ -411,6 +453,11 @@ export async function capturePages(config, options = {}) {
     only: options.only,
     ready: options.ready,
   });
+  // Before anything starts: a page this source declares that the kit already
+  // holds from another source.
+  assertPageSources(config, out);
+  const source = settings.source ?? null;
+  const pageNames = new Set(settings.pages.map((page) => page.name));
   if (!options.baseUrl && !settings.baseUrl && !settings.startCommand) {
     throw new ConfigError(
       "pages.baseUrl, or pages.startCommand with pages.waitUrl, is required (or pass --base-url)",
@@ -610,6 +657,7 @@ export async function capturePages(config, options = {}) {
             bytes: Buffer.byteLength(html),
             slots: [...capture.slots].sort(),
             ...(page.sourceFile ? { source_file: page.sourceFile } : {}),
+            ...(source ? { source, css: routeCssFile(source) } : {}),
             path: page.path,
             body_class: capture.bodyAttrs.class ?? "",
             html_attrs: capture.htmlAttrs,
@@ -628,7 +676,12 @@ export async function capturePages(config, options = {}) {
             .split("\n")
             .slice(0, 3)
             .join(" ");
-          gaps.push({ id, route: page.name, reason });
+          gaps.push({
+            id,
+            route: page.name,
+            ...(source ? { source } : {}),
+            reason,
+          });
           log(`gap ${id}: ${reason}`);
         } finally {
           await cleanup?.().catch?.(() => {});
@@ -661,6 +714,8 @@ export async function capturePages(config, options = {}) {
     fonts: fontFiles,
     theme: config.theme,
     configDir: config.configDir,
+    source,
+    pageNames,
   });
   timings.total_s = (performance.now() - startedAt) / 1000;
   const cpu = process.cpuUsage();
@@ -674,21 +729,89 @@ export async function capturePages(config, options = {}) {
   return 0;
 }
 
-function writePagesKit(
+/**
+ * Writes this capture into the kit at `out`. Without a `source` it replaces
+ * every route file, row and gap row (the stories' stay). With one it
+ * replaces only what `ownsRouteRow` gives it, so another page source's
+ * frames, rows, stylesheet and gap rows stay.
+ */
+export function writePagesKit(
   out,
-  { rows, files, css, gaps, needles, pages, widths, fonts, theme, configDir },
+  {
+    rows,
+    files,
+    css,
+    gaps,
+    needles,
+    pages,
+    widths,
+    fonts,
+    theme,
+    configDir,
+    source = null,
+    pageNames = new Set(pages.map((page) => page.name)),
+  },
 ) {
+  const owns = (row) => ownsRouteRow(row, { source, pageNames });
+  const routesPath = path.join(out, "routes.json");
+  const existingRows = readJson(routesPath);
+  // Checked again before anything is removed: another capture may have
+  // written the kit since this one started (captures into one kit are meant
+  // to run one after another).
+  const late = sourceCollisions(
+    [
+      ...asArray(existingRows),
+      ...asArray(readJson(path.join(out, "gaps.json"))),
+    ],
+    { source, pageNames },
+  );
+  if (late.length)
+    throw new ConfigError(
+      late
+        .map(
+          ({ name, other }) =>
+            `page "${name}" was captured into ${out} by page source "${other}" while source "${source}" was capturing; nothing was written`,
+        )
+        .join("\n"),
+    );
   fs.mkdirSync(path.join(out, "html"), { recursive: true });
   fs.mkdirSync(path.join(out, "css"), { recursive: true });
-  // This half's files only: earlier page captures go, story files stay.
-  for (const name of fs.readdirSync(path.join(out, "html")))
-    if (isRouteHtmlFile(name)) fs.rmSync(path.join(out, "html", name));
+  // This half's files only: earlier page captures go, story files stay. A
+  // sourced capture removes only the files of the rows it replaces.
+  if (!source) {
+    for (const name of fs.readdirSync(path.join(out, "html")))
+      if (isRouteHtmlFile(name)) fs.rmSync(path.join(out, "html", name));
+    for (const name of fs.readdirSync(path.join(out, "css")))
+      if (/^routes--.+\.css$/.test(name))
+        fs.rmSync(path.join(out, "css", name));
+  } else {
+    const stale = new Set(
+      (Array.isArray(existingRows) ? existingRows : [])
+        .filter((row) => row && typeof row === "object" && owns(row))
+        .map((row) => row.file)
+        .filter(
+          (file) =>
+            typeof file === "string" &&
+            /^html\/route[-:]/.test(file) &&
+            !file.includes(".."),
+        ),
+    );
+    // A file of one of this source's pages with no row (a kit cut short).
+    for (const name of fs.readdirSync(path.join(out, "html"))) {
+      if (!isRouteHtmlFile(name)) continue;
+      const page = name
+        .replace(/^route(?:--|:)/, "")
+        .replace(/@\d+\.html$/, "");
+      if (pageNames.has(page)) stale.add(`html/${name}`);
+    }
+    for (const file of stale) fs.rmSync(path.join(out, file), { force: true });
+  }
 
-  const sortedRows = [...rows].sort(byKey((row) => row.id));
+  const sortedRows = mergeRoutes(existingRows, rows, owns);
   const written = [
     ...[...files.entries()].sort(byKey(([file]) => file)),
     ["routes.json", kitJson(sortedRows)],
-    ["css/routes.css", css],
+    [routeCssFile(source), css],
   ];
   for (const [file, text] of written) {
     if (findForbidden(text, needles))
@@ -710,23 +833,39 @@ function writePagesKit(
     fs.copyFileSync(new URL("./kit.mjs", import.meta.url), tool);
 
   const gapsPath = path.join(out, "gaps.json");
-  fs.writeFileSync(
-    gapsPath,
-    kitJson(mergeGaps(readJson(gapsPath), gaps.filter(isRouteGap))),
+  const mergedGaps = mergeGaps(
+    readJson(gapsPath),
+    gaps.filter(isRouteGap),
+    owns,
   );
+  fs.writeFileSync(gapsPath, kitJson(mergedGaps));
 
+  const routeGaps = mergedGaps.filter(isRouteGap);
   const manifestPath = path.join(out, "manifest.json");
   const manifest = mergeManifest(readJson(manifestPath), {
     sha: gitSha(configDir),
     builtAt: new Date().toISOString(),
-    captured: sortedRows.length,
+    captured: rows.length,
     failed: gaps.length,
     pages: pages.map((page) => page.name),
     widths: widths.map((viewport) => viewport.width),
     theme,
+    source,
+    total: {
+      captured: sortedRows.length,
+      failed: routeGaps.length,
+      pages: [
+        ...new Set([...sortedRows, ...routeGaps].map(routeRowPage)),
+      ].sort(),
+      widths: [
+        ...new Set(sortedRows.map((row) => row.width).filter(Number.isInteger)),
+      ].sort((a, b) => b - a),
+    },
   });
   fs.writeFileSync(manifestPath, kitJson(manifest));
 }
+
+const asArray = (value) => (Array.isArray(value) ? value : []);
 
 function readJson(file) {
   try {

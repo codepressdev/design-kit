@@ -245,6 +245,11 @@
       "required": ["pages"],
       "description": "`design-kit capture pages`: real pages of the running app, through Playwright.",
       "properties": {
+        "source": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]*$",
+          "description": "Names this page source (such as \"web\" or \"terminal\") so several apps capture into one kit: a capture then rewrites only its own source's frames, rows, stylesheet (css/routes--<source>.css) and gap rows. Page names must be unique across sources; a name another source already captured into the kit is a config error. Without it, a capture replaces every page in the kit."
+        },
         "baseUrl": {
           "type": "string",
           "pattern": "^https?://",
@@ -282,7 +287,7 @@
         "hooks": {
           "type": "string",
           "minLength": 1,
-          "description": "A module exporting optional `context(context, info)` and `page(page, info)` hooks."
+          "description": "A module exporting optional `context(context, info)` and `page(page, info)` hooks. `page` may return `{ beforeReady, readyFailed, beforeSerialize }`: `beforeReady()` runs after the shell shows and before the ready selector is awaited, for a page reached by a click."
         },
         "widths": {
           "type": "array",

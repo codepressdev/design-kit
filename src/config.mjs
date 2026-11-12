@@ -237,6 +237,7 @@ export function resolveConfig(raw, path) {
   if (raw.pages) {
     const p = raw.pages;
     config.pages = {
+      source: p.source ?? null,
       baseUrl: p.baseUrl,
       startCommand: p.startCommand,
       waitUrl: p.waitUrl,

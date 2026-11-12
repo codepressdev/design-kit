@@ -12,6 +12,6 @@ export {
   validate,
 } from "./config.mjs";
 export { captureStories, playwrightVersion } from "./capture-stories.mjs";
-export { capturePages } from "./capture-pages.mjs";
+export { assertPageSources, capturePages } from "./capture-pages.mjs";
 export { findForbidden, forbiddenNeedles } from "./pages.mjs";
 export { compose, find, loadKit, run as runKit } from "./kit.mjs";

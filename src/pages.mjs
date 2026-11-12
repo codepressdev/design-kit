@@ -9,8 +9,16 @@
  *                                    (id `route:<name>@<width>`; no ":" in paths)
  *   routes.json                      one row per capture
  *   css/routes.css                   every rule the captured pages loaded, deduped
+ *                                    (css/routes--<source>.css for a page source)
  *   gaps.json                        shared; this half owns rows with `route`
  *                                    or an id starting `route:`
+ *
+ * Page sources: a config whose `pages.source` names one (such as `web` or
+ * `terminal`) rewrites only its own rows, files, stylesheet and gap rows, so
+ * several apps capture into one kit. Its rows carry `source` and `css`. Rows
+ * with no `source` (a capture without one, or a kit from before sources)
+ * belong to a sourced capture only when it declares their page name. A
+ * capture without a source owns every route row, as before sources existed.
  */
 
 export function kitRouteId(name, width) {
@@ -228,17 +236,73 @@ export function isRouteGap(row) {
   return row.route != null || (row.id ?? "").startsWith("route:");
 }
 
-/** Replaces this half's rows in an existing gaps.json, keeping the stories'. */
-export function mergeGaps(existing, mine) {
-  const kept = Array.isArray(existing)
-    ? existing.filter(
-        (row) => row && typeof row === "object" && !isRouteGap(row),
-      )
+/** The page a route row or route gap row is for. */
+export function routeRowPage(row) {
+  if (row.route != null) return String(row.route);
+  return String(row.id ?? "")
+    .replace(/^route:/, "")
+    .replace(/@\d+$/, "");
+}
+
+/** The stylesheet a page source's rows use: `css/routes.css` without one. */
+export function routeCssFile(source) {
+  return source ? `css/routes--${source}.css` : "css/routes.css";
+}
+
+/**
+ * Whether a capture replaces an existing route row (or route gap row): a
+ * capture without a source replaces every one; a sourced capture replaces
+ * its own source's rows and unsourced rows of a page it declares.
+ */
+export function ownsRouteRow(row, { source = null, pageNames = new Set() }) {
+  if (!source) return true;
+  if (row.source != null) return row.source === source;
+  return pageNames.has(routeRowPage(row));
+}
+
+/**
+ * Pages this capture declares that the kit already holds from another
+ * source, as `{ name, other }` (one per page): page names are unique across
+ * sources, since a row id is `route:<name>@<width>` whatever its source.
+ */
+export function sourceCollisions(rows, { source = null, pageNames }) {
+  if (!source) return [];
+  const found = new Map();
+  for (const row of rows) {
+    if (!row || typeof row !== "object" || row.source == null) continue;
+    if (row.source === source) continue;
+    const name = routeRowPage(row);
+    if (pageNames.has(name) && !found.has(name))
+      found.set(name, String(row.source));
+  }
+  return [...found].map(([name, other]) => ({ name, other }));
+}
+
+/**
+ * Replaces this half's rows in an existing gaps.json, keeping the stories'
+ * and, for a sourced capture, other sources' route rows (`owns` says which
+ * route rows this capture replaces; default every one).
+ */
+export function mergeGaps(existing, mine, owns = () => true) {
+  const rows = Array.isArray(existing)
+    ? existing.filter((row) => row && typeof row === "object")
     : [];
+  const kept = rows.filter((row) => !isRouteGap(row));
+  const otherRoutes = rows.filter((row) => isRouteGap(row) && !owns(row));
   return [
     ...kept,
-    ...[...mine].sort(byKey((row) => row.id ?? row.route ?? "")),
+    ...[...otherRoutes, ...mine].sort(
+      byKey((row) => row.id ?? row.route ?? ""),
+    ),
   ];
+}
+
+/** routes.json after a capture: other sources' rows kept, this run's added, by id. */
+export function mergeRoutes(existing, mine, owns = () => true) {
+  const kept = Array.isArray(existing)
+    ? existing.filter((row) => row && typeof row === "object" && !owns(row))
+    : [];
+  return [...kept, ...mine].sort(byKey((row) => row.id ?? ""));
 }
 
 const asObject = (value) =>
@@ -249,18 +313,30 @@ const asObject = (value) =>
  * `sources.routes` and `counts.routes` are replaced, the other sources are
  * kept, `counts.failed` is the sum of every source's `failed`, and
  * `sha`/`built_at` (and `theme`, when configured) go to the last writer.
+ *
+ * A sourced capture (`run.source`) records its own numbers under
+ * `sources.routes.page_sources[<source>]`, keeps the other page sources'
+ * entries, and makes `sources.routes` the whole kit's: `run.total` gives the
+ * captured and failed counts, pages and widths across every page source.
  */
 export function mergeManifest(existing, run) {
   const manifest = asObject(existing);
-  const sources = {
-    ...asObject(manifest.sources),
-    routes: {
-      captured: run.captured,
-      failed: run.failed,
-      pages: run.pages,
-      widths: run.widths,
-    },
+  const own = {
+    captured: run.captured,
+    failed: run.failed,
+    pages: run.pages,
+    widths: run.widths,
   };
+  const routes = run.source
+    ? {
+        ...(run.total ?? own),
+        page_sources: {
+          ...asObject(asObject(asObject(manifest.sources).routes).page_sources),
+          [run.source]: own,
+        },
+      }
+    : own;
+  const sources = { ...asObject(manifest.sources), routes };
   const failed = Object.values(sources).reduce(
     (sum, source) => sum + (Number(asObject(source).failed) || 0),
     0,
@@ -271,7 +347,7 @@ export function mergeManifest(existing, run) {
     sha: run.sha,
     built_at: run.builtAt,
     sources,
-    counts: { ...asObject(manifest.counts), routes: run.captured, failed },
+    counts: { ...asObject(manifest.counts), routes: routes.captured, failed },
     ...(run.theme ? { theme: run.theme } : {}),
   };
 }

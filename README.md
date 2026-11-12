@@ -280,6 +280,15 @@ export returns (`async ({ browser, baseUrl, config }) => state`).
   `slots` names the regions a mockup replaces: the first selector that matches
   a visible, non-empty element gets `data-kit-slot="<name>"`, and `main` is
   required. A page without a `main` slot is a gap, not a frame.
+- `source`: names this config's pages when more than one config captures
+  pages into one kit, such as a web app and a desktop app's windows. A capture
+  with a `source` rewrites only its own pages' frames and gap rows and leaves
+  every other source's in place; its stylesheet is `css/routes--<source>.css`.
+  Without one (the default), a capture replaces every page in the kit. Page
+  names must be unique across sources: a name another source already captured
+  into the kit is a config error that names both sources (exit 2), checked
+  before the capture starts and again before it writes. To move a page from
+  one source to another, rebuild the kit without the old source's rows.
 - `widths`: the sizes every page is captured at (default 1280×800 and 390×844).
 - `shellReady`: a selector the app's frame shows before any page content.
 - `layout`: `{selector, attribute, default?}` reads the layout the app chose,
@@ -293,8 +302,10 @@ value>]` then replaces `slots`.
   kit's `fonts/` folder (`copyFonts: false` keeps them out); `fontsPath` says
   which URL path holds them when not every font file is one.
 - `hooks`: a module exporting `context(context, info)` (may return a cleanup)
-  and `page(page, info)` (may return `{readyFailed, beforeSerialize}`), for
-  routing mock data or adding checks.
+  and `page(page, info)` (runs before the page opens; may return
+  `{beforeReady, readyFailed, beforeSerialize}`), for routing mock data,
+  clicking through to a view (`beforeReady` runs once `shellReady` shows,
+  before `ready` is awaited) or adding checks.
 - `timeoutMs`, `startTimeoutMs`, `fixedTime`.
 
 ## Commands
@@ -389,17 +400,21 @@ design-kit/
   html/story--<id>@<w>.html, html/route--<name>@<w>.html
   css/stories.css every rule the Storybook preview loaded, deduplicated
   css/routes.css  every rule the captured pages loaded, deduplicated
+  css/routes--<source>.css  the same, for the pages of one page source
   fonts/          the fonts both use
-  gaps.json       [{id|component|route, reason, detail?}]
+  gaps.json       [{id|component|route, reason, detail?, source?}]
   kit.mjs         the tool, copied into every kit so tool and data match
 ```
 
 A row is `{id, kind: "story"|"route", title, component?, file, width, height,
-bytes, slots?, source_file?, body_class?, html_attrs?, body_attrs?}`. Ids are
+bytes, slots?, source_file?, source?, css?, body_class?, html_attrs?,
+body_attrs?}`; a page row from a page source carries `source` and its
+stylesheet in `css`. Ids are
 `story:<storybook-id>@<width>` and `route:<name>@<width>`; file names use `--`
 instead of `:`, so the kit uploads as a CI artifact as it is. Always find a
 row's markup through its `file`. `manifest.css` may name another stylesheet
-per source (`{stories, routes}`).
+per source (`{stories, routes}`). With page sources, `manifest.sources.routes`
+keeps the kit's totals and adds `page_sources.<source>` with each one's own.
 
 ## `kit.mjs`
 
@@ -445,7 +460,11 @@ await capturePages(config, {
 
 `capturePages` also takes `forbidStrings` and `stripOrigins` (more origins to
 remove from markup, such as a mock API's) and a `session` object whose
-`interrupted` flag stops it between pages.
+`interrupted` flag stops it between pages. A harness that starts its own
+servers or builds before calling `capturePages` can call
+`assertPageSources(config, out)` first: it throws the same `ConfigError`
+(`exitCode` 2) for a page another source already captured into `out`, before
+anything starts.
 
 ## Contributing and license
 

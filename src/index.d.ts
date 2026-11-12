@@ -36,6 +36,8 @@ export interface DesignKitConfig {
   };
   stories?: Record<string, unknown>;
   pages?: {
+    /** The page source this config captures; null replaces every page. */
+    source: string | null;
     baseUrl?: string;
     fixedTime: string;
     widths: Size[];
@@ -63,8 +65,10 @@ export function captureStories(
   },
 ): Promise<{ out: string; rows: number; failed: number }>;
 
-/** Returned by a `page` hook; both run inside the capture of one page. */
+/** Returned by a `page` hook; each runs inside the capture of one page. */
 export interface PageHookResult {
+  /** After the shell shows, before the ready selector: reach the page by a click. */
+  beforeReady?(): void | Promise<void>;
   /** The ready selector never appeared; may throw a clearer error. */
   readyFailed?(): void | Promise<void>;
   /** Runs just before serialization, in place of the optional screenshot. */
@@ -111,6 +115,13 @@ export function capturePages(
   config: DesignKitConfig,
   options?: CapturePagesOptions,
 ): Promise<number>;
+
+/**
+ * Throws a ConfigError (exitCode 2) when a page the config declares is already
+ * in the kit at `out` from another page source. `capturePages` calls it before
+ * starting anything; a harness that starts its own servers can call it first.
+ */
+export function assertPageSources(config: DesignKitConfig, out: string): void;
 
 /** What to look for per forbidden value: as written, a token's long segments, and escaped. */
 export function forbiddenNeedles(values: string[]): string[];

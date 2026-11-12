@@ -67,6 +67,21 @@ function cssFile(kit, source) {
     : `css/${source}.css`;
 }
 
+/**
+ * The stylesheet a row needs: a route row of a page source names its own
+ * (`css`, inside the kit's css folder), any other row its source's.
+ */
+function rowCssFile(kit, row) {
+  const source = rowSource(row);
+  if (
+    source === "routes" &&
+    typeof row.css === "string" &&
+    /^css\/[^/]+\.css$/.test(row.css)
+  )
+    return row.css;
+  return cssFile(kit, source);
+}
+
 /** A row's markup, found only through its `file` (never derived from the id). */
 function snippetPath(kit, row) {
   if (typeof row.file !== "string" || !row.file) {
@@ -693,7 +708,7 @@ function expandSnippets(kit, html, used, budget, depth = 0) {
     const id = element.attrs.id;
     if (!id) throw new KitError("<kit-snippet> without an id attribute");
     const row = requireRow(kit, id, "<kit-snippet id>");
-    used.add(rowSource(row));
+    used.add(rowCssFile(kit, row));
     let markup = readSnippet(kit, row);
     budget.left -= markup.length;
     if (budget.left < 0) {
@@ -839,17 +854,20 @@ export function compose(
   if (theme !== "light" && theme !== "dark") {
     throw new KitError(`unknown theme "${theme}". Use light or dark.`);
   }
-  const used = new Set([rowSource(row)]);
+  const used = new Set([rowCssFile(kit, row)]);
   const filled = fillSlots(kit, row, readSnippet(kit, row), slots);
   const body = expandSnippets(kit, filled, used, {
     left: maxBytes - filled.length,
     max: maxBytes,
   });
 
-  const css = ["stories", "routes"]
-    .filter((source) => used.has(source))
-    .map((source) => {
-      const name = cssFile(kit, source);
+  // Stories' sheet first, then the route sheets, as before page sources.
+  const storiesCss = cssFile(kit, "stories");
+  const css = [...used]
+    .sort((a, b) =>
+      a === storiesCss ? -1 : b === storiesCss ? 1 : a < b ? -1 : a > b ? 1 : 0,
+    )
+    .map((name) => {
       const file = join(kit.dir, name);
       if (!existsSync(file)) {
         throw new KitError(`the kit has no ${name} for ${frame}`);
