@@ -257,7 +257,12 @@ temporary folder that is removed afterwards.
 - `viewport`: each story's first capture, unless the story sets
   `parameters.viewport.defaultViewport` (default 1280×800).
 - `widths`: more captures for stories whose title matches the `titles`
-  regular expression.
+  regular expression. A story that only works at some widths (a phone-only
+  drawer whose `play` opens what the desktop layout never shows) lists its
+  own with `parameters: { designKit: { widths: [390] } }` (numbers or
+  `{width, height}`): it is captured at exactly those, and a width it leaves
+  out is neither a row nor a gap. A failure at a width it lists is still a
+  gap, and an empty or malformed list is ignored.
 - `fonts`: `{dir, faces: [{family, file, weight?, style?, variable?,
 fallback?}]}` gives every story these faces (`file` is a name glob in `dir`;
   `variable` sets a CSS variable on `:root` for apps that read their font from
@@ -266,6 +271,11 @@ fallback?}]}` gives every story these faces (`file` is a name glob in `dir`;
 - `fixedTime`: the instant `Date` returns (default `2026-01-01T12:00:00.000Z`).
 - `gaps`: lists the component files no story covers in `gaps.json`.
   `componentGlob` is relative to `root`; stories, tests and specs never count.
+  A file with nothing to show (a context provider, a controller, a hook
+  wrapper) says so with a comment, `// design-kit: no-story <reason>` (a block
+  or JSX comment works too): its row has reason `exempt` and the reason as
+  `detail`, so a report can list it apart. A marker with no reason exempts
+  nothing; the row stays `no story`.
 
 ### `pages`
 
@@ -367,12 +377,15 @@ both with the same `--out`.
 Exit codes: 0 done, 1 a capture could not run (no Storybook build, the app
 did not start, a forbidden string) or `init` found the repository already set
 up, 2 a config or usage error. A story or page that fails is a
-`gaps.json` row and does not fail the run.
+`gaps.json` row and does not fail the run. That includes a story that holds
+the page's main thread: every wait on its page has a timer outside the page,
+so it becomes a `timeout` gap instead of stalling the run.
 
 Operational knobs: `DESIGN_KIT_CONCURRENCY` (browser pages at once, default
 4), `DESIGN_KIT_STORY_TIMEOUT_MS` (render and, separately, settle budget per
 story, default 15000), `DESIGN_KIT_QUIET_MS` (how long the DOM must stay
-unchanged, default 600), `DESIGN_KIT_TIMINGS_FILE` (per-phase capture times),
+unchanged, default 600), `DESIGN_KIT_PARAMS_READ_MS` (how long a failed capture
+waits to read the story's `designKit.widths`, default 1000), `DESIGN_KIT_TIMINGS_FILE` (per-phase capture times),
 `DESIGN_KIT_STOP_TIMEOUT_MS` (how long stopping the app may take).
 
 ## Capture rules
@@ -383,7 +396,10 @@ unchanged, default 600), `DESIGN_KIT_TIMINGS_FILE` (per-phase capture times),
 - A story is captured after Storybook's `storyRendered` event (its `play`
   function has finished), fonts, frame and image loads, no request in flight,
   and six frames plus `DESIGN_KIT_QUIET_MS` with no DOM change. A story that
-  throws, never renders or never stops changing is a gap.
+  throws, never renders or never stops changing is a gap. A story driven by a
+  live timer or a looping script can tell it is being captured from
+  `window.__DESIGN_KIT_CAPTURE__ === true`, set before any page script runs,
+  and render one still state of it instead.
 - Attributes are serialized in sorted order, and React `useId` values are
   renumbered in pages, so the markup depends on the final state, not on timing.
 - Story captures only reach the local Storybook server. Same-origin images

@@ -77,6 +77,15 @@ test("a Storybook built from a plain React + Vite project captures, and compose 
     config,
     "--out",
     out,
+    // The Hostile/ stories have their own test below, with a short budget.
+    "--only",
+    [
+      "controls-button--long-label",
+      "controls-button--primary",
+      "pages-card--default",
+      "pages-card--phone-only",
+      "pages-card--phone-only-broken",
+    ].join(","),
   ]);
   assert.equal(result.code, 0, result.output);
 
@@ -88,6 +97,8 @@ test("a Storybook built from a plain React + Vite project captures, and compose 
       "story:controls-button--primary@1280",
       "story:pages-card--default@1280",
       "story:pages-card--default@390",
+      // A phone-only story listing its own widths: 390 and never 1280.
+      "story:pages-card--phone-only@390",
     ],
   );
   const button = rows.find(
@@ -115,10 +126,21 @@ test("a Storybook built from a plain React + Vite project captures, and compose 
     ),
     JSON.stringify(gaps),
   );
-  assert.equal(gaps.filter((row) => row.id).length, 0, JSON.stringify(gaps));
+  // Leaving 1280 out of its widths is not a gap; failing at a width it lists is.
+  assert.deepEqual(
+    gaps.filter((row) => row.id).map((row) => [row.id, row.reason, row.detail]),
+    [
+      [
+        "story:pages-card--phone-only-broken@390",
+        "threw",
+        "play: broken at every width",
+      ],
+    ],
+    JSON.stringify(gaps),
+  );
   const manifest = readJson(join(out, "manifest.json"));
   assert.equal(manifest.theme.attribute, "data-theme");
-  assert.equal(manifest.sources.stories.captured, 4);
+  assert.equal(manifest.sources.stories.captured, 5);
 
   const page = join(scratch, "dark.html");
   const io = { out: () => {}, err: (text) => assert.fail(text) };
@@ -203,6 +225,59 @@ function pagesConfig(name, port, pages, extra = {}) {
     },
   });
 }
+
+test("a story with an unusable width list, or one holding the main thread before or after it renders, still becomes a gap, and one held at a width it does not list is captured at its own", async () => {
+  const out = join(scratch, "hostile-kit");
+  const config = writeConfig("hostile", {
+    version: 1,
+    stories: {
+      root: fixture("storybook-react"),
+      storybookDir: join(fixture("storybook-react"), "build"),
+    },
+  });
+  const previous = process.env.DESIGN_KIT_STORY_TIMEOUT_MS;
+  process.env.DESIGN_KIT_STORY_TIMEOUT_MS = "2000";
+  let result;
+  try {
+    result = await cli([
+      "capture",
+      "stories",
+      "--config",
+      config,
+      "--out",
+      out,
+      "--only",
+      "hostile-card--zero-widths,hostile-card--busy,hostile-card--busy-after-render,hostile-card--phone-only-held-desktop",
+    ]);
+  } finally {
+    if (previous === undefined) delete process.env.DESIGN_KIT_STORY_TIMEOUT_MS;
+    else process.env.DESIGN_KIT_STORY_TIMEOUT_MS = previous;
+  }
+  assert.equal(result.code, 0, result.output);
+  // Held at 1280, which it does not list: its widths still arrive, so 1280
+  // is neither a row nor a gap and 390 is captured.
+  assert.deepEqual(
+    readJson(join(out, "index.json")).map((row) => row.id),
+    ["story:hostile-card--phone-only-held-desktop@390"],
+  );
+  assert.deepEqual(
+    readJson(join(out, "gaps.json"))
+      .filter((row) => row.id)
+      .map((row) => [row.id, row.reason]),
+    [
+      ["story:hostile-card--busy-after-render@1280", "timeout"],
+      ["story:hostile-card--busy@1280", "timeout"],
+      ["story:hostile-card--zero-widths@1280", "threw"],
+    ],
+  );
+  // Held after it rendered: the bound on the settle, not the render wait.
+  assert.match(
+    readJson(join(out, "gaps.json")).find(
+      (row) => row.id === "story:hostile-card--busy-after-render@1280",
+    ).detail,
+    /after storyRendered/,
+  );
+});
 
 test("capture pages signs in from storageState and marks the main slot", async () => {
   const out = join(scratch, "pages-kit");

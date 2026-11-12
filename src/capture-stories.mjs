@@ -6,6 +6,7 @@
  * DESIGN_KIT_CONCURRENCY caps the browser pages working at once (default 4);
  * DESIGN_KIT_STORY_TIMEOUT_MS bounds each capture (default 15000);
  * DESIGN_KIT_QUIET_MS is how long the DOM must stay unchanged (default 600);
+ * DESIGN_KIT_PARAMS_READ_MS bounds reading a failed story's widths (default 1000);
  * DESIGN_KIT_TIMINGS_FILE, when set, receives the per-phase time breakdown.
  * Needs Playwright's Chromium (`npx playwright install chromium`).
  */
@@ -45,6 +46,38 @@ const QUIET_FRAMES = 6;
  */
 const quietMs =
   Number.parseInt(process.env.DESIGN_KIT_QUIET_MS ?? "600", 10) || 0;
+/**
+ * DESIGN_KIT_PARAMS_READ_MS: how long a failed capture waits to read the
+ * story's `designKit.widths` from the preview (default 1000).
+ */
+const paramsReadMs =
+  Number.parseInt(process.env.DESIGN_KIT_PARAMS_READ_MS ?? "1000", 10) || 1000;
+
+/**
+ * The console prefix a story's page announces its own widths with at
+ * storyPrepared. A console message reaches node even when the story holds
+ * the main thread right after, which a read of the page never would.
+ */
+const WIDTHS_ANNOUNCEMENT = "design-kit:widths ";
+
+/** A page that stopped answering: its main thread is held by the story. */
+class Unresponsive extends Error {}
+
+/**
+ * Settles with `promise`, or rejects with Unresponsive after `ms`.
+ * Playwright's evaluate has no timeout, and one set in the page cannot fire
+ * while a story holds the page's main thread, so every wait on a story's
+ * page goes through this node-side timer. The timer is cleared either way.
+ */
+function bounded(promise, ms, detail) {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_, fail) => {
+      timer = setTimeout(() => fail(new Unresponsive(detail)), ms);
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
 
 /** Storybook's built-in viewport names (minimal set plus the iPhones in use). */
 const NAMED_VIEWPORTS = {
@@ -152,14 +185,49 @@ export function mergeManifest(existing, { sha, builtAt, stories, theme }) {
 }
 
 /**
+ * A story's own widths, from `parameters.designKit.widths`: numbers or
+ * `{width, height}` entries. Anything else, or an empty list, is no list,
+ * so a malformed parameter never drops a story.
+ */
+export function ownWidths(raw) {
+  if (!Array.isArray(raw)) return null;
+  const list = [];
+  for (const entry of raw) {
+    const width = typeof entry === "number" ? entry : entry?.width;
+    const height = typeof entry === "number" ? undefined : entry?.height;
+    if (!Number.isInteger(width) || width <= 0) continue;
+    if (list.some((planned) => planned.width === width)) continue;
+    list.push(
+      Number.isInteger(height) && height > 0 ? { width, height } : { width },
+    );
+  }
+  return list.length ? list : null;
+}
+
+/**
  * Which captures a story gets: its declared viewport or the default, plus
  * each configured width whose `titles` pattern matches the story's title.
+ * A story that lists its own widths (`parameters.designKit.widths`, see
+ * ownWidths) gets exactly those, each with its listed height, else the
+ * height the declared viewport, default or a configured width has for it,
+ * else the default height.
  */
 export function plannedViewports(
   title,
   declared,
   { viewport = DEFAULT_VIEWPORT, widths = [] } = {},
+  own = null,
 ) {
+  if (own?.length) {
+    const known = [declared, viewport, ...widths].filter(Boolean);
+    return own.map(({ width, height }) => ({
+      width,
+      height:
+        height ??
+        known.find((size) => size.width === width && size.height)?.height ??
+        viewport.height,
+    }));
+  }
   const first = declared ?? viewport;
   const list = [first];
   for (const extra of widths) {
@@ -276,7 +344,7 @@ export function fontCss(base, fonts, files = fontFiles(fonts)) {
 }
 
 /** Runs before any page script: a seeded Math.random, the font CSS, and a channel tap. */
-function pageInit({ css, families }) {
+function pageInit({ css, families, width, announcement }) {
   let seed = 0x2f6b9a1d;
   Math.random = () => {
     seed = (seed + 0x6d2b79f5) | 0;
@@ -297,6 +365,9 @@ function pageInit({ css, families }) {
   }
   const kit = { outcome: null, detail: "", pending: 0 };
   window.__kit = kit;
+  // Public: a story with live data or a running animation can render a
+  // still state of it when this is set (README "Capture rules").
+  window.__DESIGN_KIT_CAPTURE__ = true;
   // In-flight requests, so settling can wait for them rather than a timer.
   const track = (promise) => {
     kit.pending += 1;
@@ -345,6 +416,25 @@ function pageInit({ css, families }) {
         finish("threw", `play: ${describe(e)}`),
       );
       value.on("storyMissing", () => finish("missing"));
+      // A story that lists its own widths and leaves this one out is not
+      // captured here: no render, no play, no gap (ownWidths).
+      value.on("storyPrepared", (event) => {
+        const own = event?.parameters?.designKit?.widths;
+        if (!Array.isArray(own)) return;
+        kit.widths = own;
+        try {
+          console.debug(`${announcement}${JSON.stringify(own)}`);
+        } catch {
+          // A list that cannot be serialized is read from __kit instead.
+        }
+        // The same rule as ownWidths: positive integer widths only, and no
+        // usable width means no list, so a malformed one never skips.
+        const listed = own
+          .map((entry) => (typeof entry === "number" ? entry : entry?.width))
+          .filter((value) => Number.isInteger(value) && value > 0);
+        if (listed.length && !listed.includes(width))
+          finish("skipped", `not listed in designKit.widths`);
+      });
     },
   });
   window.__kitLoaded = new WeakSet();
@@ -442,6 +532,7 @@ async function extract() {
     ".sb-preparing-story,.sb-preparing-docs,.sb-nopreview,.sb-errordisplay,#storybook-docs,script,noscript,template,link,[data-kit-inject]";
   const story = window.__STORYBOOK_PREVIEW__?.currentRender?.story;
   const parameters = story?.parameters ?? {};
+  const widths = parameters.designKit?.widths ?? null;
   const viewport = parameters.viewport ?? {};
   let declared = null;
   const name = viewport.defaultViewport;
@@ -577,6 +668,7 @@ async function extract() {
     html,
     sheets,
     declared,
+    widths,
     bodyClass,
     empty: !rootHasContent && !portalHasContent,
   };
@@ -638,7 +730,12 @@ async function freshPage({
   const page = await context.newPage();
   page.on("pageerror", () => {});
   await page.clock.setFixedTime(new Date(fixedTime));
-  await page.addInitScript(pageInit, { css, families });
+  await page.addInitScript(pageInit, {
+    css,
+    families,
+    width: viewport.width,
+    announcement: WIDTHS_ANNOUNCEMENT,
+  });
   return { context, page, cdp: await context.newCDPSession(page) };
 }
 
@@ -659,6 +756,20 @@ async function captureTimed(
     }));
   const { context, page, cdp } = slot;
   let reusable = false;
+  // The widths this story announced, heard even if its page then stops
+  // answering (WIDTHS_ANNOUNCEMENT).
+  let announced;
+  const hear = (message) => {
+    if (message.type() !== "debug") return;
+    const text = message.text();
+    if (!text.startsWith(WIDTHS_ANNOUNCEMENT)) return;
+    try {
+      announced = JSON.parse(text.slice(WIDTHS_ANNOUNCEMENT.length));
+    } catch {
+      // Not ours after all; the bounded read below still runs.
+    }
+  };
+  page.on("console", hear);
   try {
     await cdp.send("Storage.clearDataForOrigin", {
       origin,
@@ -673,18 +784,50 @@ async function captureTimed(
       `${origin}/iframe.html?id=${encodeURIComponent(story.id)}&viewMode=story&globals=a11y.manual:!true`,
       { waitUntil: "domcontentloaded", timeout },
     );
-    const outcome = await page
-      .waitForFunction(() => window.__kit?.outcome, null, {
-        timeout: Math.max(1000, deadline - Date.now()),
-        polling: 50,
-      })
-      .then(() => page.evaluate(() => ({ ...window.__kit })))
-      .catch(() => ({
-        outcome: "timeout",
-        detail: `no storyRendered within ${timeout}ms`,
-      }));
+    // The node-side timer bounds the wait too: Playwright's own timeout never
+    // fires while a story holds the page's main thread.
+    const notRendered = {
+      outcome: "timeout",
+      detail: `no storyRendered within ${timeout}ms`,
+    };
+    const outcome = await bounded(
+      page
+        .waitForFunction(() => window.__kit?.outcome, null, {
+          timeout: Math.max(1000, deadline - Date.now()),
+          polling: 50,
+        })
+        .then(() => page.evaluate(() => ({ ...window.__kit }))),
+      Math.max(1000, deadline - Date.now()) + 1000,
+    ).catch(() => notRendered);
     if (outcome.outcome !== "rendered") {
+      // The story's own widths: from storyPrepared, or read from the preview
+      // when this Storybook sends no parameters with it.
+      // Bounded: a story that holds the main thread (the usual reason for a
+      // timeout) would never answer, and the lane would never finish.
+      const own = ownWidths(
+        outcome.widths ??
+          announced ??
+          (await bounded(
+            page.evaluate(
+              () =>
+                window.__STORYBOOK_PREVIEW__?.currentRender?.story?.parameters
+                  ?.designKit?.widths ?? null,
+            ),
+            paramsReadMs,
+          ).catch(() => null)),
+      );
+      // Left out of the story's own widths: not a capture and not a gap.
+      // Any other failure stays one.
+      if (
+        outcome.outcome === "skipped" ||
+        (own && !own.some((entry) => entry.width === viewport.width))
+      ) {
+        // A page that timed out may still be held: never park it.
+        reusable = outcome.outcome !== "timeout";
+        return { skipped: true, widths: own };
+      }
       return {
+        widths: own,
         failure: {
           reason: outcome.outcome === "missing" ? "missing" : outcome.outcome,
           detail: outcome.detail,
@@ -701,7 +844,12 @@ async function captureTimed(
     // guests one after another. Settle the guests, then the host, until a
     // round brings no new frame and no host change.
     const settleBy = Date.now() + timeout;
-    let settled = (await page.evaluate(settle, quiet)).settled;
+    // `settle` gives up in the page after `timeout`; a second more covers the
+    // round trip, so only a page that stopped answering reaches the bound.
+    const unanswered = `page stopped answering after storyRendered (${timeout}ms)`;
+    const settleOn = (target) =>
+      bounded(target.evaluate(settle, quiet), timeout + 1000, unanswered);
+    let settled = (await settleOn(page)).settled;
     let known = new Set();
     while (settled) {
       const guests = page
@@ -711,12 +859,16 @@ async function captureTimed(
       if (!fresh && known.size === 0) break;
       known = new Set(guests);
       const results = await Promise.all(
-        // A frame that navigated away or detached has nothing left to wait for.
+        // A frame that navigated away or detached has nothing left to wait
+        // for; one that stopped answering is a timeout like its host.
         guests.map((frame) =>
-          frame.evaluate(settle, quiet).catch(() => ({ settled: true })),
+          settleOn(frame).catch((error) => {
+            if (error instanceof Unresponsive) throw error;
+            return { settled: true };
+          }),
         ),
       );
-      const host = await page.evaluate(settle, quiet);
+      const host = await settleOn(page);
       settled =
         results.every((result) => result.settled) &&
         host.settled &&
@@ -732,7 +884,11 @@ async function captureTimed(
       };
     }
     step("serialize");
-    const result = await page.evaluate(extract);
+    const result = await bounded(
+      page.evaluate(extract),
+      timeout,
+      `page stopped answering while serializing (${timeout}ms)`,
+    );
     // An inline sheet is keyed by its text, which resolved its url()s against
     // this run's server; the port must not reach the kit.
     for (const sheet of result.sheets)
@@ -746,38 +902,48 @@ async function captureTimed(
       };
     }
     reusable = true;
-    return { result };
+    return { result, widths: ownWidths(result.widths ?? outcome.widths) };
   } catch (error) {
     return {
       failure: {
-        reason: /Timeout/i.test(String(error)) ? "timeout" : "threw",
+        reason:
+          error instanceof Unresponsive || /Timeout/i.test(String(error))
+            ? "timeout"
+            : "threw",
         detail: String(error?.message ?? error)
           .split("\n")[0]
           .slice(0, 500),
       },
     };
   } finally {
+    page.off("console", hear);
     step("close");
     const parked =
       reusable &&
       parkedCount() < parkLimit &&
-      (await page
-        // Session storage lives with the tab, not the origin's data, so it
-        // is cleared on the story's own page before leaving it.
-        .evaluate(() => sessionStorage.clear())
-        .then(() => page.goto("about:blank"))
-        .then(() =>
-          page.evaluate(() => {
-            window.name = "";
-          }),
-        )
+      (await bounded(
+        page
+          // Session storage lives with the tab, not the origin's data, so it
+          // is cleared on the story's own page before leaving it.
+          .evaluate(() => sessionStorage.clear())
+          .then(() => page.goto("about:blank", { timeout }))
+          .then(() =>
+            page.evaluate(() => {
+              window.name = "";
+            }),
+          ),
+        timeout,
+      )
         .then(() => true)
         .catch(() => false));
     if (parked) {
       const list = idlePages.get(key) ?? [];
       list.push(slot);
       idlePages.set(key, list);
-    } else await context.close().catch(() => {});
+    } else {
+      // A context whose page is held is left to browser.close() at the end.
+      await bounded(context.close(), timeout).catch(() => {});
+    }
   }
 }
 
@@ -830,10 +996,31 @@ function storybookStories(buildDir) {
 }
 
 /**
+ * The reason a `design-kit: no-story <reason>` comment gives (a `//`, block or
+ * JSX comment anywhere in the file), or null when there is none or its reason
+ * is empty: a bare marker exempts nothing.
+ */
+export function noStoryReason(source) {
+  const marker =
+    /(?:\/\/|\/\*|^[ \t]*\*)[ \t]*design-kit:[ \t]*no-story\b([^\n]*)/gm;
+  for (const match of String(source).matchAll(marker)) {
+    const reason = match[1]
+      .replace(/\*\/.*$/, "")
+      .replace(/[}\s]+$/, "")
+      .trim();
+    if (reason) return reason;
+  }
+  return null;
+}
+
+/**
  * Component files nothing documents: files under `gaps.sourceRoot` whose path
  * from the Storybook project matches `gaps.componentGlob`, minus stories,
  * tests and specs, that no story names as its component or import. Paths in
- * the rows are relative to the config file's folder.
+ * the rows are relative to the config file's folder. A file carrying a
+ * `design-kit: no-story <reason>` comment (a context, a controller, a hook
+ * wrapper) is an `exempt` row with that reason as its detail, listed apart
+ * so a person can check the reason; with an empty reason it stays `no story`.
  */
 export function componentsWithoutStories(stories, { gaps, root, configDir }) {
   const documented = new Set(
@@ -855,10 +1042,13 @@ export function componentsWithoutStories(stories, { gaps, root, configDir }) {
       } else if (!/\.(stories|test|spec)\.[cm]?[jt]sx?$/.test(name.name)) {
         const rel = relative(root, path).split(sep).join("/");
         if (matchFile(pattern, rel) && !documented.has(rel)) {
-          out.push({
-            component: relative(configDir, path).split(sep).join("/"),
-            reason: "no story",
-          });
+          const component = relative(configDir, path).split(sep).join("/");
+          const exempt = noStoryReason(readFileSync(path, "utf8"));
+          out.push(
+            exempt
+              ? { component, reason: "exempt", detail: exempt }
+              : { component, reason: "no story" },
+          );
         }
       }
     }
@@ -1002,7 +1192,11 @@ export async function captureStories(config, options = {}) {
     const keepSheetsOnce = sheetStore();
     // What the timings report needs from a capture, without its result.
     const attempt = (capture) => {
-      const record = { timing: capture.timing, failure: capture.failure };
+      const record = {
+        timing: capture.timing,
+        failure: capture.failure,
+        skipped: capture.skipped,
+      };
       attempts.push(record);
       return record;
     };
@@ -1019,16 +1213,28 @@ export async function captureStories(config, options = {}) {
         fixedTime,
       });
       const firstAttempt = attempt(first);
-      let viewports = plannedViewports(story.title, null, planning);
-      const results = new Map([[planning.viewport.width, first]]);
-      if (first.result) {
-        const declared = viewportFor(first.result.declared);
-        viewports = plannedViewports(story.title, declared, planning);
-        if (declared) {
-          results.delete(planning.viewport.width);
-          firstAttempt.discarded = true;
-        }
-      }
+      // The story's declared viewport and own widths are known once it has
+      // loaded at the default one; that first capture is kept only when the
+      // plan still has the default viewport in it.
+      const declared = first.result ? viewportFor(first.result.declared) : null;
+      const viewports = plannedViewports(
+        story.title,
+        declared,
+        planning,
+        first.widths,
+      );
+      const results = new Map();
+      if (
+        !first.skipped &&
+        !declared &&
+        viewports.some(
+          (viewport) =>
+            viewport.width === planning.viewport.width &&
+            viewport.height === planning.viewport.height,
+        )
+      ) {
+        results.set(planning.viewport.width, first);
+      } else if (!first.skipped) firstAttempt.discarded = true;
       for (const viewport of viewports) {
         if (!results.has(viewport.width)) {
           const capture = await captureOne({
@@ -1046,6 +1252,7 @@ export async function captureStories(config, options = {}) {
         }
         const capture = results.get(viewport.width);
         const id = kitId(story.id, viewport.width);
+        if (capture.skipped) continue;
         if (capture.failure) {
           failures.push({ id, ...capture.failure });
         } else {
@@ -1236,6 +1443,7 @@ export async function captureStories(config, options = {}) {
     const timings = {
       ...timingBreakdown(attempts),
       discarded: attempts.filter((a) => a.discarded).length,
+      skipped: attempts.filter((a) => a.skipped).length,
       lanes: concurrency,
       quiet_ms: quietMs,
       timeout_ms: timeout,
@@ -1255,6 +1463,9 @@ export async function captureStories(config, options = {}) {
     return { out, rows: rows.length, failed: storyGaps.length };
   } finally {
     await browser?.close().catch(() => {});
+    // Parked pages belong to this browser; a later capture in the same
+    // process must not pick one up.
+    idlePages.clear();
     server?.close();
     if (ownedBuild) rmSync(ownedBuild, { recursive: true, force: true });
   }

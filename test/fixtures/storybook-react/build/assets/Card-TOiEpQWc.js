@@ -1,0 +1,1 @@
+import{R as e}from"./index-D4H_InIO.js";function r({title:a,children:t}){return e.createElement("section",{className:"fx-card"},e.createElement("h2",null,a),t)}r.__docgenInfo={description:"",methods:[],displayName:"Card"};export{r as C};
