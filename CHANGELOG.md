@@ -1,5 +1,11 @@
 # @codepress/design-kit
 
+## 0.7.0
+
+### Minor Changes
+
+- 464a85c: `kit find` searches the words on screen: every kit write builds `text.json` (each row's visible text, first 600 characters, slot text first), and a row found only by its text prints an excerpt. Kits without `text.json` find as before.
+
 ## 0.6.0
 
 ### Minor Changes
