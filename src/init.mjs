@@ -22,7 +22,8 @@ import {
 import { dirname, join, relative, resolve, sep } from "node:path";
 
 import { DEFAULT_MAX_AGE_DAYS } from "./ci.mjs";
-import { CONFIG_NAME } from "./config.mjs";
+import { CONFIG_NAME, ConfigError } from "./config.mjs";
+import { STORAGE_TYPES } from "./storage/index.mjs";
 
 const PACKAGE = JSON.parse(
   readFileSync(new URL("../package.json", import.meta.url), "utf8"),
@@ -661,12 +662,19 @@ export function watchDefaults(found) {
   );
 }
 
-/** design-kit.config.json, as an object. */
-export function buildConfig(found) {
+/** The config's $schema URL for this version of the package. */
+const SCHEMA_URL = `https://unpkg.com/${PACKAGE.name}@${PACKAGE.version}/schema/design-kit.config.schema.json`;
+
+/**
+ * design-kit.config.json, as an object. `storage` (a type) adds the
+ * storage key; without it the kit is a GitHub Actions artifact.
+ */
+export function buildConfig(found, storage) {
   const config = {
-    $schema: `https://unpkg.com/${PACKAGE.name}@${PACKAGE.version}/schema/design-kit.config.schema.json`,
+    $schema: SCHEMA_URL,
     version: 1,
     out: "design-kit",
+    ...(storage ? { storage: storageConfig(storage) } : {}),
     watch: watchDefaults(found),
     theme: {
       attribute: found.theme.attribute,
@@ -706,8 +714,115 @@ export function buildConfig(found) {
   return config;
 }
 
-/** .github/workflows/design-kit.yml, as text. */
-export function buildWorkflow(found) {
+/** The upload-artifact step and the cleanup job of `github` storage. */
+const ARTIFACT_STEPS = (kitDir) => `      - id: upload
+        if: hashFiles('${kitDir}/manifest.json') != ''
+        uses: actions/upload-artifact@v5
+        with:
+          name: design-kit
+          path: ${kitDir}
+          # The most a public repository allows. A private repository may
+          # raise it to 400 (and DESIGN_KIT_MAX_AGE_DAYS with it).
+          retention-days: ${RETENTION_DAYS}
+          if-no-files-found: error
+
+  # Deletes this branch's older kits once the new one is uploaded. The only
+  # job that may delete artifacts; a failed delete is a warning.
+  cleanup:
+    name: Delete older kits
+    needs: build
+    if: needs.build.outputs.artifact-id != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - continue-on-error: true
+        env:
+          GH_TOKEN: \${{ github.token }}
+          KEEP: \${{ needs.build.outputs.artifact-id }}
+        run: npx --yes -p "$DESIGN_KIT_PACKAGE" design-kit ci-cleanup --keep "$KEEP"
+`;
+
+/** The storage objects `init --storage <type>` writes. */
+export function storageConfig(type) {
+  if (type === "s3")
+    return {
+      type,
+      bucket: `${TODO}: your S3 bucket's name`,
+      region: `${TODO}: the bucket's AWS region, such as us-east-1`,
+    };
+  if (type === "r2")
+    return {
+      type,
+      accountId: `${TODO}: your Cloudflare account id`,
+      bucket: `${TODO}: your R2 bucket's name`,
+    };
+  return { type };
+}
+
+/**
+ * What differs between the storage types in the workflow: where the kit
+ * goes, the secrets the check and upload steps read, and the upload step.
+ */
+function workflowStorage(type, kitDir) {
+  const uploadStep = (name, env) => `      - name: ${name}
+        if: hashFiles('${kitDir}/manifest.json') != ''
+        working-directory: \${{ runner.temp }}/design-kit-cli${env}
+        run: design-kit upload --config "$CONFIG" --dir "$GITHUB_WORKSPACE/${kitDir}"
+`;
+  const awsEnv = (id, secret) => `
+          AWS_ACCESS_KEY_ID: \${{ secrets.${id} }}
+          AWS_SECRET_ACCESS_KEY: \${{ secrets.${secret} }}`;
+  if (type === "codepress")
+    return {
+      where:
+        "to CodePress, signed in with this workflow's GitHub OIDC token (no\n# secret)",
+      checkEnv: `
+          # Optional. Without a CodePress API key the check reads the newest
+          # kit with this job's GitHub OIDC token; if the read fails, it builds.
+          CODEPRESS_API_KEY: \${{ secrets.CODEPRESS_API_KEY }}`,
+      checkPermissions: "\n      id-token: write",
+      buildPermissions: `
+    # id-token: write lets design-kit upload sign in to CodePress with
+    # GitHub's OIDC token. Only this job and the check get it.
+    permissions:
+      contents: read
+      id-token: write`,
+      upload: uploadStep("Upload the kit to CodePress", ""),
+    };
+  if (type === "s3")
+    return {
+      where:
+        "to your S3 bucket (the AWS_ACCESS_KEY_ID and\n# AWS_SECRET_ACCESS_KEY repository secrets)",
+      checkEnv: awsEnv("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"),
+      buildPermissions: "",
+      upload: uploadStep(
+        "Upload the kit to S3",
+        `\n        env:${awsEnv("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY")}`,
+      ),
+    };
+  return {
+    where:
+      "to your Cloudflare R2 bucket (an R2 API token's\n# R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY repository secrets)",
+    checkEnv: awsEnv("R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY"),
+    buildPermissions: "",
+    upload: uploadStep(
+      "Upload the kit to R2",
+      `\n        env:${awsEnv("R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY")}`,
+    ),
+  };
+}
+
+/**
+ * .github/workflows/design-kit.yml, as text. `storage` is the config's
+ * storage object; without one (or with github) the kit is an artifact.
+ */
+export function buildWorkflow(found, storage = { type: "github" }) {
   const pm = found.packageManager;
   const rel = (path) => posix(relative(found.repoRoot, path)) || ".";
   const projectDir = rel(found.project);
@@ -737,6 +852,10 @@ export function buildWorkflow(found) {
     `      - uses: actions/setup-node@v5\n        with:\n          ${node}${cache}${cachePath}`,
   );
 
+  const artifact = (storage?.type ?? "github") === "github";
+  const store = artifact
+    ? null
+    : workflowStorage(storage.type, at("design-kit"));
   const storiesStep = found.storybook
     ? `
       - name: Build Storybook and capture stories
@@ -749,13 +868,18 @@ export function buildWorkflow(found) {
 
 # Captures this repository's design kit: ${found.storybook ? "every Storybook story and " : ""}the pages
 # listed in ${at(CONFIG_NAME)}, as static HTML with the CSS and fonts they
-# load. It uploads the result as the \`design-kit\` artifact, which agents
-# download to draw mockups from the app's real markup.
+# load. ${
+    artifact
+      ? `It uploads the result as the \`design-kit\` artifact, which agents
+# download to draw mockups from the app's real markup.`
+      : `It uploads the result ${store.where} with \`design-kit upload\`,
+# and agents fetch it with \`design-kit fetch\` to draw mockups from the
+# app's real markup.`
+  }
 #
 # It runs daily, but builds only when a path in the config's "watch" list
 # changed since the newest kit's commit, when there is no kit yet, or when
-# the newest kit is DESIGN_KIT_MAX_AGE_DAYS old, so a kit never expires
-# unreplaced. After an upload it deletes the branch's older kits.
+# the newest kit is DESIGN_KIT_MAX_AGE_DAYS old${artifact ? ", so a kit never expires\n# unreplaced. After an upload it deletes the branch's older kits." : "."}
 #
 # Written by \`design-kit init\` (${PACKAGE.name}); \`init --workflow-only
 # --force\` rewrites just this file. Edit it freely.
@@ -785,9 +909,13 @@ env:
   DESIGN_KIT_PACKAGE: "${PACKAGE.name}@${PACKAGE.version}"
   PLAYWRIGHT_PACKAGE: "@playwright/test@${playwrightPin()}"
   CONFIG: \${{ github.workspace }}/${at(CONFIG_NAME)}
-  # Rebuild a kit this many days old even with no UI change. Kits are kept
+  # Rebuild a kit this many days old even with no UI change.${
+    artifact
+      ? ` Kits are kept
   # ${RETENTION_DAYS} days (retention-days below), so this refreshes the kit before it
-  # expires.
+  # expires.`
+      : ""
+  }
   DESIGN_KIT_MAX_AGE_DAYS: "${DEFAULT_MAX_AGE_DAYS}"
 
 jobs:
@@ -796,8 +924,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
-      contents: read
-      actions: read
+      contents: read${artifact ? "\n      actions: read" : (store.checkPermissions ?? "")}
     outputs:
       build: \${{ steps.check.outputs.build }}
     steps:
@@ -816,8 +943,7 @@ jobs:
           node-version: "22"
 
       - id: check
-        env:
-          GH_TOKEN: \${{ github.token }}
+        env:${artifact ? "\n          GH_TOKEN: ${{ github.token }}" : store.checkEnv}
           FORCE: \${{ inputs.force || 'false' }}
           PACKAGE_INPUT: \${{ inputs.package || '' }}
         run: |
@@ -831,9 +957,13 @@ jobs:
     needs: check
     if: needs.check.outputs.build == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 60${
+      artifact
+        ? `
     outputs:
-      artifact-id: \${{ steps.upload.outputs.artifact-id }}
+      artifact-id: \${{ steps.upload.outputs.artifact-id }}`
+        : store.buildPermissions
+    }
     steps:
       - uses: actions/checkout@v5
         with:
@@ -881,42 +1011,34 @@ ${storiesStep}
         run: |
           echo "::warning title=Design kit::Nothing to capture yet, so no kit was uploaded: ${at(CONFIG_NAME)} has no stories and its pages still have ${TODO} settings. Fill in the pages (or add Storybook) and run this workflow again."
 
-      - id: upload
-        if: hashFiles('${at("design-kit")}/manifest.json') != ''
-        uses: actions/upload-artifact@v5
-        with:
-          name: design-kit
-          path: ${at("design-kit")}
-          # The most a public repository allows. A private repository may
-          # raise it to 400 (and DESIGN_KIT_MAX_AGE_DAYS with it).
-          retention-days: ${RETENTION_DAYS}
-          if-no-files-found: error
-
-  # Deletes this branch's older kits once the new one is uploaded. The only
-  # job that may delete artifacts; a failed delete is a warning.
-  cleanup:
-    name: Delete older kits
-    needs: build
-    if: needs.build.outputs.artifact-id != ''
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      actions: write
-    steps:
-      - uses: actions/setup-node@v5
-        with:
-          node-version: "22"
-
-      - continue-on-error: true
-        env:
-          GH_TOKEN: \${{ github.token }}
-          KEEP: \${{ needs.build.outputs.artifact-id }}
-        run: npx --yes -p "$DESIGN_KIT_PACKAGE" design-kit ci-cleanup --keep "$KEEP"
-`;
+${artifact ? ARTIFACT_STEPS(at("design-kit")) : store.upload}`;
 }
 
+/** Where the skill says the kit is, and how a reader signs in, per type. */
+const SKILL_STORAGE = {
+  github: {
+    where:
+      "uploads the `design-kit` artifact (kept 90 days; older kits are\ndeleted).",
+    auth: "The kit is a GitHub Actions artifact, so `fetch` uses the `gh` CLI, signed\nin with read access to this repository.",
+  },
+  codepress: {
+    where:
+      "uploads the kit to CodePress, which keeps the newest kit of each\nbranch.",
+    auth: "The kit is stored in CodePress, so `fetch` needs a CodePress API key of an\norganization that connected this repository: set `CODEPRESS_API_KEY`, or\npass `--token-file <path>` naming a file that holds the key (the key alone,\nor a `CODEPRESS_API_KEY=` line). Without either it exits 1 and says so; a\nkey of another organization gets `forbidden`.",
+  },
+  s3: {
+    where: "uploads the kit to this repository's own S3 bucket.",
+    auth: "The kit is in this repository's S3 bucket, so `fetch` runs the `aws` CLI\nwith credentials that may read it (`AWS_ACCESS_KEY_ID` and\n`AWS_SECRET_ACCESS_KEY`, or an AWS profile).",
+  },
+  r2: {
+    where: "uploads the kit to this repository's own Cloudflare R2 bucket.",
+    auth: "The kit is in this repository's Cloudflare R2 bucket, so `fetch` runs the\n`aws` CLI with an R2 API token's keys as `AWS_ACCESS_KEY_ID` and\n`AWS_SECRET_ACCESS_KEY`.",
+  },
+};
+
 /** .claude/skills/design-kit/SKILL.md, as text. */
-export function buildSkill(found) {
+export function buildSkill(found, storage = { type: "github" }) {
+  const where = SKILL_STORAGE[storage?.type] ?? SKILL_STORAGE.github;
   const pm = found.packageManager;
   const projectDir = posix(relative(found.repoRoot, found.project)) || ".";
   const cli = `npx --yes -p ${PACKAGE.name}@${PACKAGE.version} -p @playwright/test@${playwrightPin()} design-kit`;
@@ -928,6 +1050,9 @@ export function buildSkill(found) {
       ? `$DK capture stories --config "$CONFIG" --out "$KIT"   # builds Storybook first`
       : `# (no Storybook: this kit has pages only)`,
     PACKAGE: PACKAGE.name,
+    FETCH_CLI: `npx --yes -p ${PACKAGE.name}@${PACKAGE.version} design-kit`,
+    STORAGE_WHERE: where.where,
+    STORAGE_AUTH: where.auth,
     INSTALL: installCommand(pm),
     // The capture drives the project's own Playwright when it has one.
     PLAYWRIGHT_INSTALL: found.playwright
@@ -961,18 +1086,23 @@ function instructionsFile(repoRoot) {
  * The plan: every file init writes, with its content, and the notes for the
  * summary. Nothing is written here.
  */
-export function planInit(found) {
+export function planInit(found, storage) {
   const at = (path) => join(found.repoRoot, path);
-  const skill = buildSkill(found);
+  const config = buildConfig(found, storage);
+  const skill = buildSkill(found, config.storage);
   const instructions = instructionsFile(found.repoRoot);
   const instructionsText = readText(at(instructions));
   const writes = [
     {
       path: join(found.project, CONFIG_NAME),
       kind: "file",
-      content: `${JSON.stringify(buildConfig(found), null, 2)}\n`,
+      content: `${JSON.stringify(config, null, 2)}\n`,
     },
-    { path: at(WORKFLOW_PATH), kind: "file", content: buildWorkflow(found) },
+    {
+      path: at(WORKFLOW_PATH),
+      kind: "file",
+      content: buildWorkflow(found, config.storage),
+    },
     { path: at(`${SKILL_DIR}/SKILL.md`), kind: "file", content: skill },
     agentsSkillMode(found.repoRoot) === "symlink"
       ? {
@@ -1064,8 +1194,26 @@ function describe(found) {
   ];
 }
 
-function todo(found) {
-  const items = [];
+/** What is left to do for a storage type, for the summary. */
+function storageTodo(storage) {
+  const type = storage?.type;
+  if (type === "codepress")
+    return [
+      `Storage: the kit uploads to CodePress with this workflow's GitHub OIDC token, so no secret is needed. Connect this repository in CodePress (https://codepress.dev) first. The daily check reads the newest kit with the same OIDC token (or a CODEPRESS_API_KEY repository secret, if you add one) and builds when it cannot; agents and scripts read with CODEPRESS_API_KEY or --token-file.`,
+    ];
+  if (type === "s3")
+    return [
+      `Storage: fill in storage.bucket and storage.region in ${CONFIG_NAME}, and add the AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY repository secrets for a user that may read and write the bucket.`,
+    ];
+  if (type === "r2")
+    return [
+      `Storage: fill in storage.accountId and storage.bucket in ${CONFIG_NAME}, create an R2 API token with Object Read & Write on the bucket, and add its keys as the R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY repository secrets.`,
+    ];
+  return [];
+}
+
+function todo(found, storage) {
+  const items = [...storageTodo(storage)];
   const sb = found.storybook;
   if (!sb)
     items.push(
@@ -1095,7 +1243,7 @@ function todo(found) {
   return items;
 }
 
-function summary(found, plan, { dryRun, workflowOnly, notes }) {
+function summary(found, plan, { dryRun, workflowOnly, notes, storage }) {
   const rel = (path) => posix(relative(found.repoRoot, path)) || ".";
   const lines = [
     `design-kit init${workflowOnly ? " --workflow-only" : ""}${dryRun ? " --dry-run" : ""}: ${found.project}`,
@@ -1121,7 +1269,7 @@ function summary(found, plan, { dryRun, workflowOnly, notes }) {
     lines.push(`  ${rel(write.path)}${note}`);
   }
   lines.push("", "Still to decide");
-  for (const item of notes ?? todo(found)) lines.push(`  - ${item}`);
+  for (const item of notes ?? todo(found, storage)) lines.push(`  - ${item}`);
   return lines.join("\n");
 }
 
@@ -1129,10 +1277,13 @@ function summary(found, plan, { dryRun, workflowOnly, notes }) {
 
 /**
  * `init --workflow-only`: rewrites .github/workflows/design-kit.yml from
- * this version and nothing else. The config is left alone; when it has no
- * `watch` list, the summary prints the one init would write.
+ * this version, for the config's storage. The config is left alone, unless
+ * `storage` (a type) is given: then its storage key is set and its $schema
+ * moved to this version, in the same run as the workflow's new pin, since
+ * older versions reject the key. When the config has no `watch` list, the
+ * summary prints the one init would write.
  */
-function initWorkflowOnly(found, { dryRun, force, log }) {
+function initWorkflowOnly(found, { dryRun, force, log, storage }) {
   const configFile = join(found.project, CONFIG_NAME);
   if (!exists(configFile))
     throw new InitError(
@@ -1143,12 +1294,39 @@ function initWorkflowOnly(found, { dryRun, force, log }) {
     throw new InitError(
       `${WORKFLOW_PATH} already exists. Nothing was written; pass --force with --workflow-only to replace it.`,
     );
-  const plan = {
-    writes: [{ path, kind: "file", content: buildWorkflow(found) }],
-  };
-  if (!dryRun) apply(plan.writes[0]);
-  const notes = [];
   const raw = readJson(configFile);
+  if (storage && !raw)
+    throw new InitError(
+      `${configFile} is not valid JSON, so its storage key cannot be set. Fix it first.`,
+    );
+  const writes = [];
+  let configStorage = raw?.storage;
+  if (storage) {
+    configStorage =
+      raw.storage?.type === storage ? raw.storage : storageConfig(storage);
+    // The key goes after "out", where init writes it; every other key and
+    // its order stay as they are.
+    const updated = {};
+    for (const [key, value] of Object.entries(raw)) {
+      if (key === "storage") continue;
+      updated[key] = key === "$schema" ? SCHEMA_URL : value;
+      if (key === "out") updated.storage = configStorage;
+    }
+    if (!("storage" in updated)) updated.storage = configStorage;
+    writes.push({
+      path: configFile,
+      kind: "file",
+      content: `${JSON.stringify(updated, null, 2)}\n`,
+    });
+  }
+  writes.push({
+    path,
+    kind: "file",
+    content: buildWorkflow(found, configStorage),
+  });
+  const plan = { writes };
+  if (!dryRun) for (const write of writes) apply(write);
+  const notes = [...(storage ? storageTodo(configStorage) : [])];
   if (!Array.isArray(raw?.watch) || !raw.watch.length)
     notes.push(
       `${CONFIG_NAME} has no "watch" list, so the kit rebuilds after any commit. To rebuild only when the UI changes, add:\n    "watch": ${JSON.stringify(watchDefaults(found))}`,
@@ -1161,24 +1339,31 @@ function initWorkflowOnly(found, { dryRun, force, log }) {
 /**
  * Runs init. Options: `root` (the project folder, default the working
  * directory), `dryRun`, `force`, `workflowOnly` (write just the workflow, for
- * a repository set up by an older version), `log`. Returns the exit code: 0
- * done, 1 already set up or another file in the way.
+ * a repository set up by an older version), `storage` (github, codepress,
+ * s3 or r2: where the kit is stored), `log`. Returns the exit code: 0 done,
+ * 1 already set up or another file in the way.
  */
 export function init({
   root = ".",
   dryRun = false,
   force = false,
   workflowOnly = false,
+  storage,
   log = console.log,
 } = {}) {
+  if (storage !== undefined && !STORAGE_TYPES.includes(storage))
+    throw new ConfigError(
+      `--storage takes ${STORAGE_TYPES.join(", ")}, got ${storage}`,
+    );
   const found = detectProject(root);
-  if (workflowOnly) return initWorkflowOnly(found, { dryRun, force, log });
-  const plan = planInit(found);
+  if (workflowOnly)
+    return initWorkflowOnly(found, { dryRun, force, log, storage });
+  const plan = planInit(found, storage);
   if (!force) {
     const config = join(found.project, CONFIG_NAME);
     if (exists(config))
       throw new InitError(
-        `already set up: ${config} exists. Nothing was written; pass --force to replace the files init writes.`,
+        `already set up: ${config} exists. Nothing was written; pass --force to replace the files init writes${storage ? `, or run init --workflow-only --force --storage ${storage} to set where the kit is stored and rewrite only the workflow` : ""}.`,
       );
     const inTheWay = plan.writes
       .filter(
@@ -1199,7 +1384,12 @@ export function init({
     for (const write of plan.writes)
       if (write.kind !== "unchanged") apply(write);
   }
-  log(summary(found, plan, { dryRun }));
+  log(
+    summary(found, plan, {
+      dryRun,
+      storage: storage && storageConfig(storage),
+    }),
+  );
   if (!dryRun) log(`\n${CALL_TO_ACTION}`);
   return 0;
 }

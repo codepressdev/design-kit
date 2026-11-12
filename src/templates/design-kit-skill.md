@@ -1,6 +1,6 @@
 ---
 name: design-kit
-description: "Draw mockups of this app's screens from its design kit: real pages and Storybook stories captured every day as static HTML, composed into self-contained pages with only the new parts hand-drawn. Use for any mockup, design or screen page of this app. Covers fetching the newest kit with gh, kit find/show/compose, <kit-snippet> and data-kit-new, staleness, captions saying what is real and what is new, and what to do when no kit can be fetched."
+description: "Draw mockups of this app's screens from its design kit: real pages and Storybook stories captured every day as static HTML, composed into self-contained pages with only the new parts hand-drawn. Use for any mockup, design or screen page of this app. Covers fetching the newest kit with design-kit fetch, kit find/show/compose, <kit-snippet> and data-kit-new, staleness, captions saying what is real and what is new, and what to do when no kit can be fetched."
 ---
 
 # Design kit
@@ -24,27 +24,27 @@ is missing from every kit until it gets one.
 
 ## 1. Fetch the newest kit
 
-The workflow runs once a day and on demand (`workflow_dispatch`), and uploads
-the `design-kit` artifact (kept 90 days; older kits are deleted). A day when
-none of the config's `watch` paths changed skips and uploads nothing, yet
-still succeeds, so look up the newest artifact rather than the newest run,
-then download it once per kit commit:
+The workflow runs once a day and on demand (`workflow_dispatch`) and
+{{STORAGE_WHERE}}
+
+A day when none of the config's `watch` paths changed skips and uploads
+nothing, yet still succeeds, so ask for the newest kit rather than the
+newest run. `design-kit fetch` downloads it once per kit
+commit (cached under `$TMPDIR/design-kit-<sha>`) and prints `path=`, `sha=`
+and `branch=`:
 
 ```bash
-REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
-BRANCH=$(gh repo view --json defaultBranchRef --jq .defaultBranchRef.name)
-read -r RUN SHA < <(gh api "repos/$REPO/actions/artifacts?name=design-kit&per_page=100" \
-  --jq "[.artifacts[] | select((.expired | not) and .workflow_run.head_branch == \"$BRANCH\")]
-        | sort_by(.created_at) | last // empty | \"\(.workflow_run.id) \(.workflow_run.head_sha)\"")
-echo "run=$RUN sha=$SHA"   # empty → go to "When there is no kit"
-KIT="${TMPDIR:-/tmp}/design-kit-$SHA"
-if [ -n "$RUN" ] && [ ! -f "$KIT/manifest.json" ]; then
-  rm -rf "$KIT.partial" &&
-    gh run download "$RUN" --repo "$REPO" -n design-kit -D "$KIT.partial" &&
-    mv "$KIT.partial" "$KIT"
-fi
+TOP=$(git rev-parse --show-toplevel)
+OUT=$({{FETCH_CLI}} fetch --config "$TOP/{{CONFIG}}")   # fails → "When there is no kit"
+KIT=$(printf '%s\n' "$OUT" | sed -n 's/^path=//p')
+BRANCH=$(printf '%s\n' "$OUT" | sed -n 's/^branch=//p')
 node "$KIT/kit.mjs" info   # manifest: sha, built_at, counts, sources
 ```
+
+{{STORAGE_AUTH}}
+
+`--branch <name>` fetches another branch's kit, and `design-kit latest`
+prints the newest kit's `sha=` and `created=` without downloading it.
 
 Reuse `$KIT` while the newest kit's SHA is unchanged. Keep the kit and your
 working files in a scratch folder, never in the repository.

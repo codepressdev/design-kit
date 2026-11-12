@@ -9,113 +9,30 @@
  * - `design-kit ci-cleanup` deletes the older kits on the branch once a new
  *   one is uploaded. A failed delete is a warning, never a failure.
  *
- * Where kits are stored is behind two functions, `findNewestKit` and
- * `deleteOlderKits` (GitHub Actions artifacts, through `gh`), so another
- * store changes only those and the workflow's upload step.
+ * The newest kit comes from the configured store's `latest` (see
+ * src/storage/); cleanup is for `github` storage only, since CodePress and
+ * a bucket keep one pointer per branch.
  */
 import { execFileSync } from "node:child_process";
 import { appendFileSync } from "node:fs";
 import { posix } from "node:path";
 
 import { CONFIG_NAME, ConfigError, loadConfig } from "./config.mjs";
+import { errorText } from "./storage/common.mjs";
+import {
+  ARTIFACT,
+  deleteOlderKits,
+  findNewestKit,
+  runGh,
+} from "./storage/github.mjs";
+import { storageFor } from "./storage/index.mjs";
 
-export const ARTIFACT = "design-kit";
+export { ARTIFACT, deleteOlderKits, findNewestKit, runGh };
 /** Rebuild a kit this old even with no UI change, so it never expires. */
 export const DEFAULT_MAX_AGE_DAYS = 75;
 /** What `watch` means when a config has none: the whole repository. */
 export const DEFAULT_WATCH = ["."];
 const DAY_MS = 86_400_000;
-const PAGES = 5;
-
-// ── storage: GitHub Actions artifacts ───────────────────────────────────────
-
-/** Runs `gh` and returns its stdout. */
-export function runGh(args, { env = process.env } = {}) {
-  return execFileSync("gh", args, {
-    encoding: "utf8",
-    env,
-    stdio: ["ignore", "pipe", "pipe"],
-    maxBuffer: 32 * 1024 * 1024,
-  });
-}
-
-/** Every `design-kit` artifact of the repository, newest first. */
-function listKits({ repo, gh }) {
-  const artifacts = [];
-  for (let page = 1; page <= PAGES; page += 1) {
-    const body = JSON.parse(
-      gh([
-        "api",
-        `repos/${repo}/actions/artifacts?name=${ARTIFACT}&per_page=100&page=${page}`,
-      ]),
-    );
-    const batch = body?.artifacts ?? [];
-    artifacts.push(...batch);
-    if (batch.length < 100) break;
-  }
-  return artifacts
-    .filter((artifact) => artifact.name === ARTIFACT)
-    .sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
-}
-
-/**
- * The newest unexpired kit on `branch`: `{id, sha, createdAt, runId}`, or
- * null when there is none. Throws when the store cannot be read.
- */
-export function findNewestKit({ repo, branch, gh = runGh }) {
-  const kit = listKits({ repo, gh }).find(
-    (artifact) =>
-      !artifact.expired && artifact.workflow_run?.head_branch === branch,
-  );
-  if (!kit?.workflow_run?.head_sha) return null;
-  return {
-    id: String(kit.id),
-    sha: kit.workflow_run.head_sha,
-    createdAt: kit.created_at,
-    runId: kit.workflow_run.id ? String(kit.workflow_run.id) : null,
-  };
-}
-
-/**
- * Deletes the kits on `branch` older than the one `keep` names (an artifact
- * id). Returns `{deleted: [ids], failed: [{id, error}], keptFound}`; never
- * throws for a single failed delete. When the kept kit is not in the listing
- * (not listed yet, or on another branch), nothing is deleted: "older" has
- * nothing to be measured against.
- */
-export function deleteOlderKits({ repo, branch, keep, gh = runGh }) {
-  const kits = listKits({ repo, gh }).filter(
-    (artifact) => artifact.workflow_run?.head_branch === branch,
-  );
-  const kept = kits.find((artifact) => String(artifact.id) === String(keep));
-  const deleted = [];
-  const failed = [];
-  if (!kept) return { deleted, failed, keptFound: false };
-  for (const artifact of kits) {
-    if (String(artifact.id) === String(keep)) continue;
-    // Only kits uploaded before the one just kept: a newer one, or one
-    // uploaded in the same instant, is never removed.
-    if (!(Date.parse(artifact.created_at) < Date.parse(kept.created_at)))
-      continue;
-    try {
-      gh([
-        "api",
-        "--method",
-        "DELETE",
-        `repos/${repo}/actions/artifacts/${artifact.id}`,
-      ]);
-      deleted.push(String(artifact.id));
-    } catch (error) {
-      failed.push({ id: String(artifact.id), error: errorText(error) });
-    }
-  }
-  return { deleted, failed, keptFound: Boolean(kept) };
-}
-
-function errorText(error) {
-  const stderr = error?.stderr ? String(error.stderr).trim() : "";
-  return (stderr || error?.message || String(error)).split("\n")[0];
-}
 
 // ── git: ids of the watched paths ───────────────────────────────────────────
 
@@ -282,9 +199,9 @@ export function decide({
 
 /**
  * Looks everything up and decides. `kit` given (`{sha, createdAt}`, or null
- * for "no kit") skips the store lookup; otherwise `findKit()` is called.
- * `head` is the commit being built (default HEAD). Returns
- * `{build, reason, kit}`.
+ * for "no kit", with `lookupError` when the lookup failed) skips the store
+ * lookup; otherwise `findKit()` is called. `head` is the commit being built
+ * (default HEAD). Returns `{build, reason, kit}`.
  */
 export function ciCheck({
   repoDir,
@@ -293,12 +210,12 @@ export function ciCheck({
   force = false,
   packageSpec = "",
   kit,
+  lookupError,
   findKit,
   now = Date.now(),
   maxAgeDays = DEFAULT_MAX_AGE_DAYS,
 }) {
   const inputs = { force, packageSpec, now, maxAgeDays };
-  let lookupError;
   if (kit === undefined && !force && !packageSpec) {
     try {
       kit = findKit();
@@ -343,12 +260,16 @@ function maxAgeFrom(value, env) {
   return days;
 }
 
-function repoAndBranch(options, env) {
+function repoAndBranch(options, env, storage = { type: "github" }) {
   const repo = options.repo ?? env.GITHUB_REPOSITORY;
   const branch = options.branch ?? env.GITHUB_REF_NAME;
-  if (!repo || !branch)
+  // A bucket is not keyed by repository; GitHub and CodePress are.
+  const needsRepo = storage.type === "github" || storage.type === "codepress";
+  if ((needsRepo && !repo) || !branch)
     throw new ConfigError(
-      "--repo <owner/name> and --branch <name> are needed outside GitHub Actions",
+      needsRepo
+        ? "--repo <owner/name> and --branch <name> are needed outside GitHub Actions"
+        : "--branch <name> is needed outside GitHub Actions",
     );
   return { repo, branch };
 }
@@ -371,9 +292,15 @@ function summary(text, env) {
 
 /**
  * `design-kit ci-check`: prints `build=true|false` and `reason=…` (and
- * writes them to $GITHUB_OUTPUT and the step summary when set).
+ * writes them to $GITHUB_OUTPUT and the step summary when set). The newest
+ * kit comes from the configured store's `latest`. With `github` storage
+ * (or when no lookup is needed) it runs synchronously and returns 0; the
+ * other stores answer over the network, so it returns a promise of 0.
  */
-export function ciCheckCommand(options, { env = process.env, gh, now } = {}) {
+export function ciCheckCommand(
+  options,
+  { env = process.env, gh, aws, now } = {},
+) {
   const config = loadConfig(options.config);
   const watch = config.raw.watch?.length ? config.raw.watch : DEFAULT_WATCH;
   if ((options.since === undefined) !== (options["kit-created"] === undefined))
@@ -392,20 +319,57 @@ export function ciCheckCommand(options, { env = process.env, gh, now } = {}) {
     "rev-parse",
     "--show-toplevel",
   ]).trim();
-  const result = ciCheck({
+  const storage = config.storage ?? { type: "github" };
+  const check = {
     repoDir,
     watch,
     force: Boolean(options.force),
     packageSpec: options.package ?? "",
-    kit,
-    findKit: () =>
-      findNewestKit({
-        ...repoAndBranch(options, env),
-        gh: gh ?? ((args) => runGh(args, { env })),
-      }),
     now: now ?? Date.now(),
     maxAgeDays: maxAgeFrom(options["max-age-days"], env),
-  });
+  };
+  const store = () => {
+    const { repo, branch } = repoAndBranch(options, env, storage);
+    return {
+      branch,
+      store: storageFor(storage, {
+        repo,
+        env,
+        gh: gh ?? ((args) => runGh(args, { env })),
+        aws,
+      }),
+    };
+  };
+  const finish = (result) => {
+    report(result, env);
+    return 0;
+  };
+  if (kit !== undefined || check.force || check.packageSpec)
+    return finish(ciCheck({ ...check, kit }));
+  if (storage.type === "github")
+    return finish(
+      ciCheck({
+        ...check,
+        findKit: () => {
+          const { store: github, branch } = store();
+          return github.latest({ branch });
+        },
+      }),
+    );
+  return (async () => {
+    let found = null;
+    let lookupError;
+    try {
+      const { store: other, branch } = store();
+      found = await other.latest({ branch });
+    } catch (error) {
+      lookupError = errorText(error);
+    }
+    return finish(ciCheck({ ...check, kit: found, lookupError }));
+  })();
+}
+
+function report(result, env) {
   if (result.missing?.length)
     console.log(
       `::warning title=Design kit::These watch paths do not exist at this commit, so they never trigger a rebuild: ${result.missing.join(", ")}. Fix or remove them in ${CONFIG_NAME}.`,
@@ -422,7 +386,6 @@ export function ciCheckCommand(options, { env = process.env, gh, now } = {}) {
     `Design kit: ${result.build ? "building" : "nothing to build"}, ${result.reason}.`,
     env,
   );
-  return 0;
 }
 
 /**

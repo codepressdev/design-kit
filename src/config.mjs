@@ -194,6 +194,7 @@ export function resolveConfig(raw, path) {
       errors.push(`pages.pages[${index}].name: "${page.name}" is used twice`);
     names.add(page?.name);
   });
+  if (!errors.length && raw.storage) errors.push(...storageErrors(raw.storage));
   if (errors.length) {
     throw new ConfigError(
       `${path}:\n${errors.map((error) => `  ${error}`).join("\n")}`,
@@ -208,6 +209,7 @@ export function resolveConfig(raw, path) {
     configDir,
     raw,
     out: at(raw.out),
+    storage: raw.storage ? { ...raw.storage } : { type: "github" },
     theme: raw.theme ? normalizeTheme(raw.theme) : undefined,
   };
   if (raw.stories) {
@@ -262,6 +264,44 @@ export function resolveConfig(raw, path) {
     };
   }
   return config;
+}
+
+/** The keys each storage type takes, and which of them it needs. */
+const STORAGE_KEYS = {
+  github: { allowed: [], required: [] },
+  codepress: { allowed: ["url", "apiUrl"], required: [] },
+  s3: {
+    allowed: ["bucket", "prefix", "region", "endpoint"],
+    required: ["bucket"],
+  },
+  r2: {
+    allowed: ["accountId", "bucket", "prefix"],
+    required: ["accountId", "bucket"],
+  },
+};
+
+/** What the schema cannot say about `storage`: the keys each type takes. */
+function storageErrors(storage) {
+  const keys = STORAGE_KEYS[storage.type];
+  if (!keys) return [];
+  const errors = [];
+  for (const key of keys.required)
+    if (!(key in storage))
+      errors.push(`storage.${key}: is required for ${storage.type} storage`);
+  for (const key of Object.keys(storage)) {
+    if (key === "type") continue;
+    if (!keys.allowed.includes(key))
+      errors.push(
+        `storage.${key}: not used by ${storage.type} storage${key === "endpoint" && storage.type === "r2" ? " (r2 derives it from accountId)" : ""}`,
+      );
+    else if (/^TODO/.test(String(storage[key])))
+      errors.push(`storage.${key}: still ${storage[key]}`);
+    else if (key === "accountId" && !/^[A-Za-z0-9]+$/.test(storage[key]))
+      errors.push(
+        "storage.accountId: must be your Cloudflare account id, letters and digits only",
+      );
+  }
+  return errors;
 }
 
 /** The theme as the manifest records it, with its defaults filled in. */

@@ -196,6 +196,77 @@ start command, sign-in, a missing Storybook. It never overwrites an existing
 file without `--force` (a repository with a `design-kit.config.json` exits 1,
 "already set up") and never writes a secret.
 
+## Where the kit is stored
+
+The config's `storage` key says where the workflow puts each kit and where
+`design-kit fetch` and `ci-check` read it. Agents and CI use the same commands
+whichever you pick. Choose one at setup with
+`init --storage github|codepress|s3|r2`, or later with
+`init --workflow-only --force --storage <type>`, which sets the key and
+rewrites the workflow in the same run.
+
+| `storage`                                          | Where                         | Upload                                | Reading                               |
+| -------------------------------------------------- | ----------------------------- | ------------------------------------- | ------------------------------------- |
+| absent, or `{"type": "github"}`                    | a GitHub Actions artifact     | the workflow's `upload-artifact` step | `gh`, signed in to the repository     |
+| `{"type": "codepress"}`                            | CodePress                     | `design-kit upload`, no secret        | a CodePress API key                   |
+| `{"type": "s3", "bucket", "region"?, "prefix"?}`   | your own AWS S3 bucket        | `design-kit upload`, two secrets      | the `aws` CLI with read access        |
+| `{"type": "r2", "accountId", "bucket", "prefix"?}` | your own Cloudflare R2 bucket | `design-kit upload`, two secrets      | the `aws` CLI with an R2 token's keys |
+
+**GitHub** (the default). Nothing to set up. Each kit is a `design-kit`
+artifact, kept 90 days on a public repository (the workflow rebuilds before
+then) and read through the `gh` CLI.
+
+**CodePress.** CodePress keeps the newest kit of each branch for as long as
+the repository is connected. Connect the repository in
+[CodePress](https://codepress.dev), then add
+`"storage": {"type": "codepress"}`. No secret is needed: the build job has
+`permissions: id-token: write`, and `design-kit upload` signs in with the
+workflow's GitHub OIDC token, which proves which repository and branch it
+comes from. To read a kit, set `CODEPRESS_API_KEY` to an API key of an
+organization that connected the repository, or pass `--token-file <path>`
+(a file holding the key alone, or a `CODEPRESS_API_KEY=` line). The daily
+check reads the newest kit with the key when the repository has a
+`CODEPRESS_API_KEY` secret, and otherwise with its own OIDC token (its job
+gets `id-token: write` too); when the read fails, it builds. `url` (default
+`https://codepress.dev`) and `apiUrl` (default
+`https://api.codepress.dev/v1`) point at another CodePress. This needs
+CodePress's kit storage, which is on codepress.dev; a repository that is not
+connected is refused with `repo_not_connected`.
+
+**Your own S3 bucket.** Create the bucket and an IAM user that may read and
+write it, add `"storage": {"type": "s3", "bucket": "my-kits", "region":
+"us-east-1"}`, and add the user's keys as the `AWS_ACCESS_KEY_ID` and
+`AWS_SECRET_ACCESS_KEY` repository secrets (Settings > Secrets and variables
+
+> Actions). `endpoint` points at another S3-compatible store.
+
+**Your own Cloudflare R2 bucket.** Create the bucket, then an R2 API token
+with **Object Read & Write** on it (R2 > Manage API tokens). Add
+`"storage": {"type": "r2", "accountId": "<your account id>", "bucket":
+"my-kits"}`; the endpoint (`https://<accountId>.r2.cloudflarestorage.com`) and
+region (`auto`) follow from the account id. Add the token's keys as the
+`R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY` repository secrets; the
+workflow passes them to the `aws` CLI as `AWS_ACCESS_KEY_ID` and
+`AWS_SECRET_ACCESS_KEY`.
+
+In a bucket, each kit is `<prefix>/<branch>/<sha>.zip`, and
+`<prefix>/<branch>/latest.json` names the newest; an upload writes the zip
+first and `latest.json` last. Older zips stay until you delete them, for
+example with a lifecycle rule on the prefix. `s3` and `r2` need the `aws` CLI,
+which GitHub's Ubuntu runners have; elsewhere a missing `aws` is an error
+that says so.
+
+**GitHub Enterprise Server.** `codepress` storage works only for
+repositories on github.com: CodePress connects github.com repositories and
+accepts only github.com's OIDC tokens. On GitHub Enterprise Server, use
+`github`, `s3` or `r2`, and pass `--repo <owner/name>` where the commands
+cannot read it from `GITHUB_REPOSITORY`.
+
+**Adding `storage` by hand?** Bump the pinned version too:
+`DESIGN_KIT_PACKAGE` in the workflow and the version in the config's
+`$schema`. Versions before `storage` existed reject the key as unknown, so an
+older pin fails the run. `init --storage` does both for you.
+
 ## Configuration
 
 The commands read `design-kit.config.json` from the working directory or the
@@ -322,6 +393,11 @@ value>]` then replaces `slots`.
 
 ```bash
 design-kit init            [--root dir] [--dry-run] [--force] [--workflow-only]
+                           [--storage github|codepress|s3|r2]
+design-kit upload          --dir kit [--config f] [--branch b] [--sha commit]
+design-kit fetch           [--branch b] [--out dir] [--config f] [--repo owner/name]
+                           [--token-file f]
+design-kit latest          [--branch b] [--config f] [--repo owner/name] [--token-file f]
 design-kit capture stories [--config f] [--out dir] [--storybook-dir dir]
                            [--only id,... | --only-file f] [--base previous-kit]
 design-kit capture pages   [--config f] [--out dir] [--base-url url] [--only name,...]
@@ -335,8 +411,20 @@ design-kit setup-guide
 design-kit storybook-guide
 ```
 
-`ci-check` and `ci-cleanup` are the workflow's steps. `ci-check` finds the
-newest unexpired `design-kit` artifact on the branch (through `gh`, from
+`upload`, `fetch` and `latest` work with the configured storage (see
+[Where the kit is stored](#where-the-kit-is-stored)). `upload` sends a built
+kit (`codepress`, `s3` and `r2`; with `github` it exits 2, since the
+workflow's upload step does it). `fetch` downloads the newest kit once per
+commit, into `$TMPDIR/design-kit-<sha>` unless `--out` says otherwise, and
+prints `path=`, `sha=` and `branch=`; a second `fetch` of the same commit
+downloads nothing. `latest` prints the newest kit's `sha=` and `created=`.
+Without `--branch` they read the default branch. A store's refusal keeps its
+name (`forbidden`, `no_kit`, `repo_not_connected`, …), a store that cannot be
+reached is `kit_storage_unavailable`, and both exit 1.
+
+`ci-check` and `ci-cleanup` are the workflow's steps. `ci-check` gets the
+newest kit on the branch from the storage's `latest` (for `github`, the
+newest unexpired `design-kit` artifact through `gh`; from
 `GITHUB_REPOSITORY` and `GITHUB_REF_NAME`, or `--repo` and `--branch`), or
 takes it from `--since` and `--kit-created`. It fetches that commit (shallow,
 no file contents) and compares the git tree or blob id of each `watch` path
@@ -345,8 +433,8 @@ counts as changed. It prints `build=true` or `build=false` and the reason
 (`changed: src`, `watched files unchanged since 3f2a9c1`, `refresh before
 expiry: …`, `no kit yet on this branch`, `forced …`, `an explicit package was
 given …`) and writes them to `$GITHUB_OUTPUT` and the step summary. A kit
-that cannot be looked up or fetched builds. `ci-cleanup` deletes the
-branch's kits older than `--keep` and warns about any it could not delete;
+that cannot be looked up or fetched builds. `ci-cleanup` (`github` storage
+only) deletes the branch's kits older than `--keep` and warns about any it could not delete;
 both always exit 0 unless the config is invalid.
 
 `setup-guide` prints the agent skill for setting a kit up in a repository

@@ -31,11 +31,59 @@
       },
       "description": "The paths whose change rebuilds the kit in CI (`design-kit ci-check`), relative to the repository root. A run where none of them changed since the newest kit's commit builds nothing. Without it, any change in the repository rebuilds. `init` writes the Storybook and app folders, the workspace packages they use, global styles, this file, the lockfile and the workflow."
     },
+    "storage": { "$ref": "#/$defs/storage" },
     "theme": { "$ref": "#/$defs/theme" },
     "stories": { "$ref": "#/$defs/stories" },
     "pages": { "$ref": "#/$defs/pages" }
   },
   "$defs": {
+    "storage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "description": "Where the kit is stored. Without it, \"github\": a GitHub Actions artifact. Older versions of the package reject this key, so bump the pinned version (DESIGN_KIT_PACKAGE in the workflow) when you add it by hand.",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["github", "codepress", "s3", "r2"],
+          "description": "\"github\" (default): a GitHub Actions artifact. \"codepress\": CodePress keeps the newest kit of each branch; the workflow signs in with its GitHub OIDC token. \"s3\": your own AWS S3 bucket. \"r2\": your own Cloudflare R2 bucket."
+        },
+        "url": {
+          "type": "string",
+          "pattern": "^https?://[^\\s/]+/?$",
+          "description": "codepress: the CodePress address, which is also the upload token's audience. Default https://codepress.dev."
+        },
+        "apiUrl": {
+          "type": "string",
+          "pattern": "^https?://\\S+$",
+          "description": "codepress: the CodePress API base. Default https://api.codepress.dev/v1 for the default url, else <url>/v1."
+        },
+        "bucket": {
+          "type": "string",
+          "minLength": 1,
+          "description": "s3 and r2: the bucket's name."
+        },
+        "prefix": {
+          "type": "string",
+          "description": "s3 and r2: a folder in the bucket for the kits, such as \"design-kits\". Kits are <prefix>/<branch>/<sha>.zip with <prefix>/<branch>/latest.json."
+        },
+        "region": {
+          "type": "string",
+          "minLength": 1,
+          "description": "s3: the bucket's AWS region, such as \"us-east-1\". Default: the aws CLI's own (AWS_REGION)."
+        },
+        "endpoint": {
+          "type": "string",
+          "pattern": "^https?://\\S+$",
+          "description": "s3: the endpoint of another S3-compatible store. Not needed for AWS S3, or for R2 (use type \"r2\")."
+        },
+        "accountId": {
+          "type": "string",
+          "minLength": 1,
+          "description": "r2: your Cloudflare account id (letters and digits). The endpoint https://<accountId>.r2.cloudflarestorage.com and region auto follow from it."
+        }
+      }
+    },
     "size": {
       "type": "object",
       "additionalProperties": false,

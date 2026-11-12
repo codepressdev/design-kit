@@ -28,7 +28,19 @@ const USAGE = `usage: design-kit <command> [options]
   init              set a kit up in this repository: the config, a daily
                     GitHub Actions build, and a skill for its agents
       [--root <dir>] [--dry-run] [--force] [--workflow-only]
-                    --workflow-only --force rewrites just the workflow
+      [--storage github|codepress|s3|r2]
+                    --workflow-only --force rewrites just the workflow;
+                    with --storage it also sets where the kit is stored
+  upload            upload a built kit to the configured storage
+                    (codepress, s3 or r2; github uploads in the workflow)
+      --dir <kit> [--config <file>] [--branch <name>] [--sha <commit>]
+  fetch             download the newest kit, once per commit (cached under
+                    $TMPDIR/design-kit-<sha>); prints path=, sha= and branch=
+      [--branch <name>] [--out <dir>] [--config <file>] [--repo <owner/name>]
+      [--token-file <path>]   codepress: the API key, if not CODEPRESS_API_KEY
+  latest            print the newest kit's sha= and created=
+      [--branch <name>] [--config <file>] [--repo <owner/name>]
+      [--token-file <path>]
   capture stories   capture every story of a Storybook 7-9 static build
       [--config <file>] [--out <dir>] [--storybook-dir <dir>]
       [--only <id,...> | --only-file <file>] [--base <previous kit>]
@@ -57,8 +69,8 @@ const USAGE = `usage: design-kit <command> [options]
 
 The config is the nearest design-kit.config.json at or above the working
 directory unless --config names one. Exit codes: 0 done, 1 a capture could
-not run (or init found the repository already set up), 2 a config or usage
-error.`;
+not run, a store refused or could not be reached (or init found the
+repository already set up), 2 a config or usage error.`;
 
 function parse(argv, spec) {
   const options = {};
@@ -190,6 +202,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
         "dry-run": "flag",
         force: "flag",
         "workflow-only": "flag",
+        storage: "value",
       });
       const { init } = await import("./init.mjs");
       return init({
@@ -197,6 +210,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
         dryRun: Boolean(options["dry-run"]),
         force: Boolean(options.force),
         workflowOnly: Boolean(options["workflow-only"]),
+        storage: options.storage,
       });
     }
     if (command === "ci-check") {
@@ -212,7 +226,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
         branch: "value",
       });
       const { ciCheckCommand } = await import("./ci.mjs");
-      return ciCheckCommand(options, { env });
+      return await ciCheckCommand(options, { env });
     }
     if (command === "ci-cleanup") {
       const options = parse(argv.slice(1), {
@@ -222,6 +236,25 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
       });
       const { ciCleanupCommand } = await import("./ci.mjs");
       return ciCleanupCommand(options, { env });
+    }
+    if (command === "upload" || command === "fetch" || command === "latest") {
+      const spec = {
+        config: "value",
+        branch: "value",
+        repo: "value",
+        ...(command === "upload"
+          ? { dir: "value", sha: "value" }
+          : { "token-file": "value" }),
+        ...(command === "fetch" ? { out: "value" } : {}),
+      };
+      const options = parse(argv.slice(1), spec);
+      const storage = await import("./storage/index.mjs");
+      const run = {
+        upload: storage.uploadCommand,
+        fetch: storage.fetchCommand,
+        latest: storage.latestCommand,
+      }[command];
+      return await run(options, { env });
     }
     if (command === "setup-guide") {
       parse(argv.slice(1), {});

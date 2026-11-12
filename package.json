@@ -50,7 +50,8 @@
   "devDependencies": {
     "@playwright/test": "1.58.2",
     "oxlint": "^1.51.0",
-    "prettier": "^3.8.1"
+    "prettier": "^3.8.1",
+    "yaml": "2.8.3"
   },
   "keywords": [
     "design-kit",

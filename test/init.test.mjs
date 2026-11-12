@@ -14,9 +14,15 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { after, mock, test } from "node:test";
 
+import { parse as parseYaml } from "yaml";
+
 import { main } from "../src/cli.mjs";
 import { resolveConfig } from "../src/config.mjs";
 import { CALL_TO_ACTION } from "../src/init.mjs";
+
+const VERSION = JSON.parse(
+  readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+).version;
 
 const scratch = mkdtempSync(join(tmpdir(), "design-kit-init-test-"));
 after(() => rmSync(scratch, { recursive: true, force: true }));
@@ -475,4 +481,151 @@ test("init --workflow-only without a config says to run init", async () => {
   const result = await cli(["init", "--root", root, "--workflow-only"]);
   assert.equal(result.code, 1);
   assert.match(result.output, /Run init without --workflow-only/);
+});
+
+/** The workflow init wrote in `root`, parsed (a YAML error throws). */
+const workflowOf = (root) =>
+  parseYaml(
+    readFileSync(join(root, ".github/workflows/design-kit.yml"), "utf8"),
+  );
+const stepsUsing = (workflow, pattern) =>
+  Object.values(workflow.jobs).flatMap((job) =>
+    job.steps.filter((step) => pattern.test(step.uses ?? step.run ?? "")),
+  );
+
+test("the default (github) workflow parses as YAML and uploads an artifact", async () => {
+  const root = storybookRepo();
+  assert.equal((await cli(["init", "--root", root])).code, 0);
+  const workflow = workflowOf(root);
+  assert.deepEqual(Object.keys(workflow.jobs), ["check", "build", "cleanup"]);
+  assert.equal(stepsUsing(workflow, /^actions\/upload-artifact@/).length, 1);
+  assert.equal(stepsUsing(workflow, /design-kit upload/).length, 0);
+  assert.equal(
+    "storage" in readJson(join(root, "design-kit.config.json")),
+    false,
+  );
+});
+
+test("init --storage codepress: id-token: write only on the build job, design-kit upload and no artifact step", async () => {
+  const root = storybookRepo();
+  const result = await cli(["init", "--root", root, "--storage", "codepress"]);
+  assert.equal(result.code, 0, result.output);
+  const config = readJson(join(root, "design-kit.config.json"));
+  assert.deepEqual(config.storage, { type: "codepress" });
+  // The key and the version that knows it are written together.
+  assert.match(config.$schema, new RegExp(`@${VERSION}/schema/`));
+  resolveConfig(structuredClone(config), join(root, "design-kit.config.json"));
+
+  const workflow = workflowOf(root);
+  assert.equal(
+    workflow.env.DESIGN_KIT_PACKAGE,
+    `@codepress/design-kit@${VERSION}`,
+  );
+  assert.deepEqual(Object.keys(workflow.jobs), ["check", "build"]);
+  assert.deepEqual(workflow.permissions, { contents: "read" });
+  assert.deepEqual(workflow.jobs.build.permissions, {
+    contents: "read",
+    "id-token": "write",
+  });
+  // The check reads the newest kit with its own OIDC token when there is
+  // no API key secret, so it is the one other job with id-token: write.
+  assert.deepEqual(workflow.jobs.check.permissions, {
+    contents: "read",
+    "id-token": "write",
+  });
+  assert.equal(stepsUsing(workflow, /upload-artifact/).length, 0);
+  const [upload] = stepsUsing(workflow, /design-kit upload/);
+  assert.equal(upload.if, "hashFiles('design-kit/manifest.json') != ''");
+  assert.match(upload.run, /--dir "\$GITHUB_WORKSPACE\/design-kit"/);
+  const check = workflow.jobs.check.steps.find((step) => step.id === "check");
+  assert.equal(check.env.CODEPRESS_API_KEY, "${{ secrets.CODEPRESS_API_KEY }}");
+  assert.equal(check.env.GH_TOKEN, undefined);
+  assert.match(result.output, /Connect this repository in CodePress/);
+});
+
+test("init --storage r2 maps the R2 token's secrets to the AWS variables, and asks for the account id and bucket", async () => {
+  const root = storybookRepo();
+  const result = await cli(["init", "--root", root, "--storage", "r2"]);
+  assert.equal(result.code, 0, result.output);
+  const workflow = workflowOf(root);
+  const [upload] = stepsUsing(workflow, /design-kit upload/);
+  const check = workflow.jobs.check.steps.find((step) => step.id === "check");
+  for (const env of [upload.env, check.env])
+    assert.deepEqual(
+      [env.AWS_ACCESS_KEY_ID, env.AWS_SECRET_ACCESS_KEY],
+      [
+        "${{ secrets.R2_ACCESS_KEY_ID }}",
+        "${{ secrets.R2_SECRET_ACCESS_KEY }}",
+      ],
+    );
+  assert.equal(workflow.jobs.build.permissions, undefined);
+  assert.equal(stepsUsing(workflow, /upload-artifact/).length, 0);
+  const config = readJson(join(root, "design-kit.config.json"));
+  assert.equal(config.storage.type, "r2");
+  // The TODOs stop the config validating until they are filled in.
+  assert.throws(
+    () => resolveConfig(config, join(root, "design-kit.config.json")),
+    /storage\.accountId: still TODO/,
+  );
+  assert.match(result.output, /R2 API token with Object Read & Write/);
+
+  const s3 = storybookRepo();
+  assert.equal((await cli(["init", "--root", s3, "--storage", "s3"])).code, 0);
+  const [s3Upload] = stepsUsing(workflowOf(s3), /design-kit upload/);
+  assert.equal(
+    s3Upload.env.AWS_ACCESS_KEY_ID,
+    "${{ secrets.AWS_ACCESS_KEY_ID }}",
+  );
+});
+
+test("init --workflow-only --force --storage sets the key in an existing config and rewrites the workflow; plain init points there", async () => {
+  const root = storybookRepo();
+  assert.equal((await cli(["init", "--root", root])).code, 0);
+  const configFile = join(root, "design-kit.config.json");
+  const old = readJson(configFile);
+  old.$schema = old.$schema.replace(/@[^/]+\/schema/, "@0.4.0/schema");
+  old.out = "kit-out";
+  writeFileSync(configFile, JSON.stringify(old));
+
+  const refused = await cli(["init", "--root", root, "--storage", "codepress"]);
+  assert.equal(refused.code, 1);
+  assert.match(
+    refused.output,
+    /init --workflow-only --force --storage codepress/,
+  );
+
+  const result = await cli([
+    "init",
+    "--root",
+    root,
+    "--workflow-only",
+    "--force",
+    "--storage",
+    "codepress",
+  ]);
+  assert.equal(result.code, 0, result.output);
+  const updated = readJson(configFile);
+  assert.deepEqual(Object.keys(updated), [
+    "$schema",
+    "version",
+    "out",
+    "storage",
+    ...Object.keys(old).slice(3),
+  ]);
+  assert.deepEqual(updated.storage, { type: "codepress" });
+  assert.match(updated.$schema, new RegExp(`@${VERSION}/schema/`));
+  for (const key of Object.keys(old))
+    if (key !== "$schema") assert.deepEqual(updated[key], old[key], key);
+  assert.ok(workflowOf(root).jobs.build.permissions["id-token"]);
+
+  // Rewriting the workflow again keeps the config's storage.
+  assert.equal(
+    (await cli(["init", "--root", root, "--workflow-only", "--force"])).code,
+    0,
+  );
+  assert.equal(stepsUsing(workflowOf(root), /design-kit upload/).length, 1);
+
+  const bad = await cli(["init", "--root", root, "--storage", "gcs"]);
+  assert.equal(bad.code, 2);
+  assert.match(bad.output, /--storage takes github, codepress, s3, r2/);
 });
