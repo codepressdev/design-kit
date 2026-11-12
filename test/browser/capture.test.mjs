@@ -165,6 +165,48 @@ test("a Storybook built from a plain React + Vite project captures, and compose 
   assert.match(html, /<html [^>]*data-theme="dark"/);
   assert.match(html, /Save changes/);
   assert.match(html, /url\("data:font\/woff2;base64,/);
+
+  // text.json holds every row's on-screen words, and an incremental build
+  // that recaptures one story keeps text for the rows it copies from the base.
+  assert.equal(
+    readJson(join(out, "text.json"))["story:controls-button--primary@1280"],
+    "Save changes",
+  );
+  const next = join(scratch, "stories-kit-incremental");
+  const incremental = await cli([
+    "capture",
+    "stories",
+    "--config",
+    config,
+    "--out",
+    next,
+    "--base",
+    out,
+    "--only",
+    "controls-button--primary",
+  ]);
+  assert.equal(incremental.code, 0, incremental.output);
+  const text = readJson(join(next, "text.json"));
+  assert.deepEqual(
+    Object.keys(text),
+    rows.map((row) => row.id),
+  );
+  assert.match(
+    text["story:controls-button--long-label@1280"],
+    /close the editor/,
+  );
+  const lines = [];
+  assert.equal(
+    run(["--kit", next, "find", "close the editor"], {
+      out: (line) => lines.push(line),
+      err: (line) => assert.fail(line),
+    }),
+    0,
+  );
+  assert.match(
+    lines.join("\n"),
+    /^story:controls-button--long-label@1280 .*"Save every change made in this session and close the editor"$/,
+  );
 });
 
 async function freePort() {

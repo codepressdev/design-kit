@@ -413,6 +413,7 @@ design-kit/
   manifest.json   {kit_version, sha, built_at, counts, sources, theme?, css?}
   index.json      story rows, sorted by id
   routes.json     page rows
+  text.json       {id: the row's visible text, first 600 characters}
   html/story--<id>@<w>.html, html/route--<name>@<w>.html
   css/stories.css every rule the Storybook preview loaded, deduplicated
   css/routes.css  every rule the captured pages loaded, deduplicated
@@ -439,10 +440,30 @@ The tool needs only Node: no install and no network.
 ```bash
 node kit.mjs info                    # the manifest
 node kit.mjs find button             # ≤ 30 lines: id, kind, width, bytes, title
+node kit.mjs find "transfer app"     # the words on screen work too
 node kit.mjs show <id> [--full]      # path, size and an outline (≤ 2 KB) or the markup
 node kit.mjs compose --frame route:dashboard@1280 --slot main=new.html \
   [--theme light|dark] [--show-new] --out page.html
 ```
+
+`find` lists the rows holding every word of the query in their id, title,
+component, source file or visible text. Rows with the words in the id come
+first, then the title, component or source file, then the text only; among
+rows that tie, one whose text holds the whole query comes first. A row found
+only through its text ends with a quoted excerpt of about 60 characters
+around the words, so you see why it matched. When more rows match than the
+30 lines hold, rows found by name fill the list but its last 5 lines are kept
+for rows found by text, and the closing line counts what each left out
+(`+37 more by name, +3 more by on-screen text; narrow the query`). The text
+is `text.json`, built
+whenever a capture writes the kit: each row's markup without its scripts,
+styles, SVG, head and templates, tags and attribute values dropped, entities
+decoded and whitespace collapsed, with the row's `data-kit-slot` regions
+first (so a page's own words come ahead of the navigation every page
+repeats), cut to 600 characters. Rows an incremental build copies from its
+base get text too, and a page capture refuses a `text.json` holding a
+`forbidStrings` value as it does the markup. A kit without `text.json` finds
+by id, title, component and source file only.
 
 `compose` writes one self-contained page: the frame's markup with slots
 filled and every `<kit-snippet id="…">` expanded, its CSS inlined, every

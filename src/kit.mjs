@@ -4,7 +4,7 @@
  * always match. Pure Node: no dependencies, no network.
  *
  *   node kit.mjs info
- *   node kit.mjs find <query>
+ *   node kit.mjs find <query>        (ids, titles and the words on screen)
  *   node kit.mjs show <id> [--full]
  *   node kit.mjs compose --frame <id> [--slot <name>=<file>]… [--theme light|dark]
  *                        [--show-new] --out <file>
@@ -17,6 +17,8 @@ import { basename, dirname, extname, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const FIND_LIMIT = 30;
+/** Of FIND_LIMIT, the lines kept for rows found by on-screen text. */
+const FIND_TEXT_LINES = 5;
 const SHOW_LIMIT = 2048;
 const SNIPPET_DEPTH = 8;
 /**
@@ -35,7 +37,10 @@ function readJson(file, fallback) {
   return JSON.parse(readFileSync(file, "utf8"));
 }
 
-/** Story rows from index.json plus route rows from routes.json, by id. */
+/**
+ * Story rows from index.json plus route rows from routes.json, by id, and
+ * each row's visible text from text.json when the kit has one.
+ */
 export function loadKit(dir) {
   const manifest = readJson(join(dir, "manifest.json"), null);
   const rows = new Map();
@@ -50,7 +55,15 @@ export function loadKit(dir) {
   const sorted = [...rows.values()].sort((a, b) =>
     a.id < b.id ? -1 : a.id > b.id ? 1 : 0,
   );
-  return { dir, manifest, rows: sorted, byId: new Map(rows) };
+  const text = readText(dir);
+  return {
+    dir,
+    manifest,
+    rows: sorted,
+    byId: new Map(rows),
+    // Only a kit with text.json has it, so an older kit loads as before.
+    ...(text ? { text } : {}),
+  };
 }
 
 function rowSource(row) {
@@ -179,19 +192,24 @@ function parseAttributes(source) {
 
 /** Tokens with offsets: open / close / text / comment. */
 export function tokenize(html) {
-  const tokens = [];
+  return [...scan(html)];
+}
+
+/** `tokenize`, one token at a time, so a reader can stop early. */
+function* scan(html) {
+  let lower = null;
   let i = 0;
   while (i < html.length) {
     const lt = html.indexOf("<", i);
     if (lt < 0) {
-      tokens.push({ type: "text", start: i, end: html.length });
+      yield { type: "text", start: i, end: html.length };
       break;
     }
-    if (lt > i) tokens.push({ type: "text", start: i, end: lt });
+    if (lt > i) yield { type: "text", start: i, end: lt };
     if (html.startsWith("<!--", lt)) {
       const close = html.indexOf("-->", lt + 4);
       const end = close < 0 ? html.length : close + 3;
-      tokens.push({ type: "comment", start: lt, end });
+      yield { type: "comment", start: lt, end };
       i = end;
       continue;
     }
@@ -200,7 +218,7 @@ export function tokenize(html) {
       html.slice(lt + (closing ? 2 : 1), lt + 200),
     );
     if (!nameMatch) {
-      tokens.push({ type: "text", start: lt, end: lt + 1 });
+      yield { type: "text", start: lt, end: lt + 1 };
       i = lt + 1;
       continue;
     }
@@ -217,29 +235,29 @@ export function tokenize(html) {
     const end = Math.min(j + 1, html.length);
     const name = nameMatch[0].toLowerCase();
     if (closing) {
-      tokens.push({ type: "close", name, start: lt, end });
+      yield { type: "close", name, start: lt, end };
       i = end;
       continue;
     }
     const inner = html.slice(lt + 1 + nameMatch[0].length, end - 1);
     const selfClosing = /\/\s*$/.test(inner);
-    tokens.push({
+    yield {
       type: "open",
       name,
       attrs: parseAttributes(inner.replace(/\/\s*$/, "")),
       start: lt,
       end,
       selfClosing: selfClosing || VOID.has(name),
-    });
+    };
     i = end;
     if (RAW.has(name) && !selfClosing) {
-      const closeAt = html.toLowerCase().indexOf(`</${name}`, end);
+      lower ??= html.toLowerCase();
+      const closeAt = lower.indexOf(`</${name}`, end);
       const stop = closeAt < 0 ? html.length : closeAt;
-      if (stop > end) tokens.push({ type: "text", start: end, end: stop });
+      if (stop > end) yield { type: "text", start: end, end: stop };
       i = stop;
     }
   }
-  return tokens;
 }
 
 /** Each element with its inner range: [{name, attrs, start, end, innerStart, innerEnd, depth}]. */
@@ -912,6 +930,174 @@ ${sanitizeMarkup(body)}
   return page;
 }
 
+// ── visible text (text.json) ────────────────────────────────────────────────
+
+/** Characters of visible text text.json keeps per row. */
+export const TEXT_LIMIT = 600;
+/** Characters of a `find` excerpt. */
+const EXCERPT_CHARS = 60;
+/** Elements whose content is never read on screen as text. */
+const HIDDEN_CONTENT = new Set([
+  "script",
+  "style",
+  "svg",
+  "head",
+  "template",
+  "noscript",
+  "title",
+]);
+/** Phrasing elements that sit inside a word; every other tag separates words. */
+const INLINE = new Set(
+  "a abbr b bdi bdo cite code data dfn em i kbd mark q s samp small strong sub sup time u var wbr".split(
+    " ",
+  ),
+);
+
+/** Each `data-kit-slot` element's inner range, for slot-first text. */
+function slotRanges(html) {
+  if (!html.includes("data-kit-slot")) return [];
+  return elements(html)
+    .filter((element) => element.attrs["data-kit-slot"] !== undefined)
+    .map((element) => [element.innerStart, element.innerEnd]);
+}
+
+/**
+ * The words a row shows: text content outside scripts, styles, SVG, the head
+ * and templates, entities decoded and whitespace collapsed, at most `limit`
+ * characters. Attribute values are never text. The text of the row's slots
+ * (a page's `main`) comes first and the rest of the markup after it, so a
+ * page's own words are kept ahead of the navigation and top bar every page
+ * repeats.
+ */
+export function visibleText(html, limit = TEXT_LIMIT) {
+  const ranges = slotRanges(html);
+  const lastSlotEnd = Math.max(0, ...ranges.map(([, end]) => end));
+  const inSlot = (at) => ranges.some(([from, to]) => at >= from && at < to);
+  // [slot text, the rest]
+  const parts = ["", ""];
+  const add = (at, words) => {
+    const part = inSlot(at) ? 0 : 1;
+    if (words === " " && (parts[part] === "" || parts[part].endsWith(" ")))
+      return;
+    parts[part] += words;
+  };
+  let hidden = null;
+  let depth = 0;
+  for (const token of scan(html)) {
+    if (hidden) {
+      if (token.name !== hidden) continue;
+      if (token.type === "open" && !token.selfClosing) depth += 1;
+      else if (token.type === "close" && (depth -= 1) === 0) hidden = null;
+      continue;
+    }
+    if (token.type === "open" || token.type === "close") {
+      if (
+        token.type === "open" &&
+        HIDDEN_CONTENT.has(token.name) &&
+        !token.selfClosing
+      ) {
+        hidden = token.name;
+        depth = 1;
+      } else if (!INLINE.has(token.name)) {
+        add(token.start, " ");
+      }
+      continue;
+    }
+    if (token.type !== "text") continue;
+    add(
+      token.start,
+      decodeEntities(html.slice(token.start, token.end)).replace(/\s+/g, " "),
+    );
+    // Enough collected: a row's text is a search aid, not its content.
+    const [slot, rest] = parts;
+    if (slot.length > limit * 2 && slot.trim().length > limit) break;
+    if (
+      token.end >= lastSlotEnd &&
+      slot.length + rest.length > limit * 2 &&
+      `${slot} ${rest}`.trim().length > limit
+    )
+      break;
+  }
+  return [...`${parts[0]} ${parts[1]}`.replace(/\s+/g, " ").trim()]
+    .slice(0, limit)
+    .join("");
+}
+
+/**
+ * text.json's content: each row's visible text by id, from its markup.
+ * `read(file)` returns a row's markup by its kit-relative `file`; a row
+ * whose file is missing or leaves the kit has no entry. The first row of an
+ * id wins, as in `loadKit`.
+ */
+export function kitText(rows, read) {
+  const text = {};
+  const seen = new Set();
+  for (const row of rows) {
+    if (!row || typeof row.id !== "string" || seen.has(row.id)) continue;
+    seen.add(row.id);
+    const file = row.file;
+    if (typeof file !== "string" || !file || file.split(/[\\/]/).includes(".."))
+      continue;
+    let html;
+    try {
+      html = read(file);
+    } catch {
+      continue;
+    }
+    if (typeof html !== "string") continue;
+    const words = visibleText(html);
+    if (words) text[row.id] = words;
+  }
+  return Object.fromEntries(
+    Object.entries(text).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+  );
+}
+
+/** text.json as written: stable keys, one row per line. */
+export function kitTextJson(text) {
+  return `${JSON.stringify(text, null, 1)}\n`;
+}
+
+/** Rebuilds `dir`/text.json from the rows and markup already in the kit. */
+export function writeKitText(dir) {
+  const kit = loadKit(dir);
+  const json = kitTextJson(
+    kitText(kit.rows, (file) => readFileSync(join(dir, file), "utf8")),
+  );
+  writeFileSync(join(dir, "text.json"), json);
+  return json;
+}
+
+/** text.json, if the kit has a readable one: id → visible text. */
+function readText(dir) {
+  const file = join(dir, "text.json");
+  if (!existsSync(file)) return undefined;
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync(file, "utf8"));
+  } catch {
+    // An optional search aid: a broken one leaves find as it is without it.
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+    return undefined;
+  const text = new Map();
+  for (const [id, words] of Object.entries(parsed))
+    if (typeof words === "string") text.set(id, words);
+  return text;
+}
+
+/** About EXCERPT_CHARS of `words` around `at`, cut words marked with "…". */
+function excerpt(words, at, length) {
+  const chars = [...words];
+  // `at` counts UTF-16 units; recount it in characters.
+  const from = [...words.slice(0, at)].length;
+  let start = Math.max(0, from - Math.floor((EXCERPT_CHARS - length) / 2));
+  const end = Math.min(chars.length, start + EXCERPT_CHARS);
+  start = Math.max(0, end - EXCERPT_CHARS);
+  return `${start > 0 ? "…" : ""}${chars.slice(start, end).join("").trim()}${end < chars.length ? "…" : ""}`;
+}
+
 // ── show / find / info ──────────────────────────────────────────────────────
 
 export function outline(html, limit = SHOW_LIMIT) {
@@ -948,8 +1134,17 @@ function formatBytes(bytes) {
   return bytes >= 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${bytes} B`;
 }
 
-export function find(kit, query) {
+/**
+ * Rows holding every word of `query` in their id, title, component, source
+ * file or visible text (text.json), best first: a word in the id ranks
+ * above one in the title, component or source file, which ranks above one
+ * only in the text, and among rows that tie, one whose text holds the whole
+ * query as written comes first. A row a word matched only through its text
+ * carries an `excerpt` around that phrase, or else the first such word.
+ */
+export function findMatches(kit, query) {
   const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+  const phrase = terms.join(" ");
   const scored = [];
   for (const row of kit.rows) {
     const id = row.id.toLowerCase();
@@ -957,20 +1152,59 @@ export function find(kit, query) {
       .filter(Boolean)
       .join(" ")
       .toLowerCase();
-    if (!terms.every((term) => hay.includes(term))) continue;
-    const score = terms.reduce(
-      (sum, term) => sum + (id.includes(term) ? 0 : 1),
-      0,
-    );
-    scored.push({ row, score });
+    const words = kit.text?.get(row.id) ?? "";
+    let lowered = null;
+    let score = 0;
+    let textHit = null;
+    let matched = true;
+    for (const term of terms) {
+      if (id.includes(term)) continue;
+      if (hay.includes(term)) {
+        score += 1;
+        continue;
+      }
+      lowered ??= words.toLowerCase();
+      const at = lowered.indexOf(term);
+      if (at < 0) {
+        matched = false;
+        break;
+      }
+      score += 2;
+      textHit ??= { at, length: term.length };
+    }
+    if (!matched) continue;
+    // The whole query as written, in the text: the excerpt shows it, and it
+    // ranks first among rows that tie.
+    const at = textHit && terms.length > 1 ? lowered.indexOf(phrase) : -1;
+    if (at >= 0) textHit = { at, length: phrase.length };
+    scored.push({
+      row,
+      score,
+      phrase: at >= 0 ? 0 : 1,
+      ...(textHit
+        ? { excerpt: excerpt(words, textHit.at, textHit.length) }
+        : {}),
+    });
   }
-  scored.sort((a, b) => a.score - b.score || (a.row.id < b.row.id ? -1 : 1));
-  return scored.map(({ row }) => row);
+  scored.sort(
+    (a, b) =>
+      a.score - b.score ||
+      a.phrase - b.phrase ||
+      (a.row.id < b.row.id ? -1 : 1),
+  );
+  return scored.map(({ row, excerpt: cut }) =>
+    cut === undefined ? { row } : { row, excerpt: cut },
+  );
+}
+
+/** Rows holding every word of `query`, best first (see findMatches). */
+export function find(kit, query) {
+  return findMatches(kit, query).map(({ row }) => row);
 }
 
 function findLines(kit, query) {
-  const rows = find(kit, query);
-  if (!rows.length) {
+  const matches = findMatches(kit, query);
+  if (!matches.length) {
     const near = nearMatches(
       query,
       kit.rows.map((row) => row.id),
@@ -979,15 +1213,40 @@ function findLines(kit, query) {
       `nothing matches "${query}".${near.length ? ` Near: ${near.join(", ")}` : ""}`,
     );
   }
-  const shown = rows.length > FIND_LIMIT ? rows.slice(0, FIND_LIMIT - 1) : rows;
-  const lines = shown.map(
-    (row) =>
-      `${row.id}  ${row.kind ?? rowSource(row)}  ${row.width ?? "?"}w  ${formatBytes(row.bytes ?? 0)}  ${row.title ?? ""}`,
-  );
-  if (rows.length > shown.length) {
-    lines.push(`… ${rows.length - shown.length} more; add a word to narrow it`);
+  const line = ({ row, excerpt: cut }) =>
+    `${row.id}  ${row.kind ?? rowSource(row)}  ${row.width ?? "?"}w  ${formatBytes(row.bytes ?? 0)}  ${row.title ?? ""}${cut === undefined ? "" : `  "${cut}"`}`;
+  if (matches.length <= FIND_LIMIT) return matches.map(line);
+  const room = FIND_LIMIT - 1;
+  // A row with an excerpt was found by on-screen text; any other, by name.
+  const byText = matches.filter((match) => match.excerpt !== undefined);
+  if (!byText.length) {
+    return [
+      ...matches.slice(0, room).map(line),
+      `… ${matches.length - room} more; add a word to narrow it`,
+    ];
   }
-  return lines;
+  // Names fill the list first, but the last lines are kept for text hits,
+  // so an agent sees them even when names alone would fill it.
+  const byName = matches.filter((match) => match.excerpt === undefined);
+  const textRoom = Math.min(
+    byText.length,
+    Math.max(FIND_TEXT_LINES, room - byName.length),
+  );
+  const names = byName.slice(0, room - textRoom);
+  const texts = byText.slice(0, room - names.length);
+  const left = [
+    ...(byName.length > names.length
+      ? [`+${byName.length - names.length} more by name`]
+      : []),
+    ...(byText.length > texts.length
+      ? [`+${byText.length - texts.length} more by on-screen text`]
+      : []),
+  ];
+  return [
+    ...names.map(line),
+    ...texts.map(line),
+    `${left.join(", ")}; narrow the query`,
+  ];
 }
 
 function showText(kit, id, full) {
@@ -1022,7 +1281,7 @@ function infoText(kit) {
 
 const USAGE = `usage: kit.mjs [--kit <dir>] <command>
   info                         print the manifest
-  find <query>                 list up to ${FIND_LIMIT} matching ids
+  find <query>                 list up to ${FIND_LIMIT} rows whose id, title or on-screen text holds every word
   show <id> [--full]           path, size and an outline (--full: the markup)
   compose --frame <id> [--slot <name>=<file>]… [--theme light|dark] [--show-new] --out <file>`;
 

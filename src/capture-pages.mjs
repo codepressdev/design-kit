@@ -42,6 +42,7 @@ import {
   sourceCollisions,
 } from "./pages.mjs";
 import { ConfigError } from "./config.mjs";
+import { kitText, kitTextJson, visibleText } from "./kit.mjs";
 import { loadPlaywright } from "./playwright.mjs";
 
 const STOP_TIMEOUT_MS =
@@ -601,6 +602,8 @@ export async function capturePages(config, options = {}) {
           const found = findForbidden(
             [
               html,
+              // The words text.json will hold, entities decoded.
+              visibleText(html),
               JSON.stringify(capture.htmlAttrs),
               JSON.stringify(capture.bodyAttrs),
             ].join("\n"),
@@ -774,6 +777,20 @@ export function writePagesKit(
         )
         .join("\n"),
     );
+  const sortedRows = mergeRoutes(existingRows, rows, owns);
+  // text.json covers the whole kit, stories included, and is checked for
+  // forbidden values before anything is removed or written.
+  const text = kitTextJson(
+    kitText(
+      [...asArray(readJson(path.join(out, "index.json"))), ...sortedRows],
+      (file) =>
+        files.get(file) ?? fs.readFileSync(path.join(out, file), "utf8"),
+    ),
+  );
+  if (findForbidden(text, needles))
+    throw new Error(
+      "text.json carries a forbidStrings value; refusing to write the kit",
+    );
   fs.mkdirSync(path.join(out, "html"), { recursive: true });
   fs.mkdirSync(path.join(out, "css"), { recursive: true });
   // This half's files only: earlier page captures go, story files stay. A
@@ -807,11 +824,11 @@ export function writePagesKit(
     for (const file of stale) fs.rmSync(path.join(out, file), { force: true });
   }
 
-  const sortedRows = mergeRoutes(existingRows, rows, owns);
   const written = [
     ...[...files.entries()].sort(byKey(([file]) => file)),
     ["routes.json", kitJson(sortedRows)],
     [routeCssFile(source), css],
+    ["text.json", text],
   ];
   for (const [file, text] of written) {
     if (findForbidden(text, needles))

@@ -30,6 +30,7 @@ import { extname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { globToRegExp, matchFile } from "./glob.mjs";
+import { writeKitText } from "./kit.mjs";
 import { loadPlaywright, playwrightVersion } from "./playwright.mjs";
 
 export { playwrightVersion };
@@ -1386,6 +1387,9 @@ export async function captureStories(config, options = {}) {
       join(out, "index.json"),
       `${JSON.stringify(rows, null, 1)}\n`,
     );
+    // Every row's on-screen words for `kit find`, rows kept from the base
+    // and the pages' rows included, so an incremental build is complete.
+    writeKitText(out);
 
     const storyGaps = [
       ...failures,

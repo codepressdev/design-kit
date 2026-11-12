@@ -30,12 +30,47 @@ export interface Kit {
   manifest: KitManifest | null;
   rows: KitRow[];
   byId: Map<string, KitRow>;
+  /** Each row's visible text by id, from text.json; absent in older kits. */
+  text?: Map<string, string>;
 }
 
 export function loadKit(dir: string): Kit;
 
-/** Rows whose id, title, component or source file holds every word. */
+/** One `find` result; `excerpt` is set when a word matched only the row's text. */
+export interface KitMatch {
+  row: KitRow;
+  excerpt?: string;
+}
+
+/**
+ * Rows whose id, title, component, source file or visible text holds every
+ * word: id matches first, then title, component or source file, then text.
+ */
+export function findMatches(kit: Kit, query: string): KitMatch[];
+
+/** The rows of `findMatches`, in the same order. */
 export function find(kit: Kit, query: string): KitRow[];
+
+/** Characters of visible text text.json keeps per row: 600. */
+export const TEXT_LIMIT: number;
+
+/**
+ * A row's on-screen words: text outside scripts, styles, SVG, the head and
+ * templates, entities decoded, whitespace collapsed, at most `limit` characters.
+ */
+export function visibleText(html: string, limit?: number): string;
+
+/** text.json's content for `rows`, reading each row's markup by its `file`. */
+export function kitText(
+  rows: KitRow[],
+  read: (file: string) => string,
+): Record<string, string>;
+
+/** text.json as written. */
+export function kitTextJson(text: Record<string, string>): string;
+
+/** Rebuilds `dir`/text.json from the rows and markup already in the kit. */
+export function writeKitText(dir: string): string;
 
 /** Up to five candidates, closest first. */
 export function nearMatches(wanted: string, candidates: string[]): string[];
