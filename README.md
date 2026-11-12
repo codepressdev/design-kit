@@ -24,6 +24,56 @@ It runs on Node 20 or later. Playwright is a peer dependency, so the capture
 drives the Playwright and Chromium your project already has. The `kit`
 commands need neither.
 
+## Set it up with your agent
+
+The quickest way in is to let your coding agent do the whole setup. Paste this
+into Claude Code, Codex, Cursor or any agent that can run commands in your
+repository:
+
+```text
+Set up a design kit in this repository. Run
+`npx --yes @codepress/design-kit setup-guide` and follow what it prints.
+Open one pull request and don't merge it.
+```
+
+`setup-guide` prints the setup skill that ships in this package, so the agent
+needs nothing installed beforehand. Following it, the agent:
+
+1. Runs `init`, which detects your stack and writes the config, the daily
+   workflow and the agent skill (see [Set up in your repository](#set-up-in-your-repository)).
+2. Fills in the pages to capture: the command that starts your app, and three
+   to eight main screens, each with a selector that shows when it has loaded.
+3. Decides between Storybook stories and real pages. With Storybook, it
+   captures every story. Without it, it asks you whether to add Storybook,
+   capture your real pages, or both. When nobody answers, it captures pages and
+   writes stories for the components several screens share.
+4. Wires sign-in, when your pages need one, through a seeded test user and the
+   repository secrets `DESIGN_KIT_USERNAME` and `DESIGN_KIT_PASSWORD`. It never
+   writes a credential; the pull request says which secrets to add.
+5. Builds the kit once, checks what it captured, and opens the pull request
+   with the counts, any gaps and a screenshot of one composed screen.
+
+No Storybook yet and you want one? Add a line to the prompt:
+
+```text
+We don't have Storybook. Add it, with stories for our shared components
+covering their default, empty, loading, error and long-text states.
+```
+
+New stories are written for React. On another stack the agent captures your
+real pages and says so in the pull request.
+
+Once the pull request merges, the daily workflow uploads the kit, and the
+`design-kit` skill it installed tells your agents to use it. Ask for a mockup
+the way you would ask a designer:
+
+```text
+Mock up a Billing tab on our settings page, using the design kit.
+```
+
+The agent fetches the newest kit, composes the screen from your real frame and
+components, and draws only what is new.
+
 ## Set up in your repository
 
 `design-kit init` sets a kit up as one reviewable change. Run it in the
@@ -183,7 +233,7 @@ design-kit setup-guide
 that has none, as one reviewable pull request: run `init`, decide between
 Storybook stories and page capture, wire sign-in through repository secrets,
 build the kit once and report what it captured. An agent without the skill
-installed can run `npx --yes @codepress/design-kit@0.1.3 setup-guide` and
+installed can run `npx --yes @codepress/design-kit setup-guide` and
 follow what it prints.
 
 `--only` re-captures just those stories (Storybook ids, with or without the
