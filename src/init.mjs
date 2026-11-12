@@ -916,11 +916,11 @@ function todo(found) {
   const sb = found.storybook;
   if (!sb)
     items.push(
-      "No Storybook: the config captures pages only. Decide whether to add Storybook with stories for the components the main screens use, capture real pages, or both.",
+      "No Storybook: the config captures pages only. Decide whether to add Storybook with stories for the components the main screens use (`npx --yes @codepress/design-kit storybook-guide` prints a guide for that), capture real pages, or both.",
     );
-  else if (sb.major && (sb.major < 7 || sb.major > 8))
+  else if (sb.major && (sb.major < 7 || sb.major > 9))
     items.push(
-      `Storybook ${sb.version}: captures are supported for Storybook 7 and 8 static builds; check that \`capture stories\` works, or use page capture.`,
+      `Storybook ${sb.version}: captures are supported for Storybook 7, 8 and 9 static builds; check that \`capture stories\` works, or use page capture.`,
     );
   items.push(
     `Pages: replace the ${TODO} selectors in ${CONFIG_NAME} (pages[].ready and slots.main), add the app's main screens, and check startCommand and waitUrl. Until then the workflow skips page capture.`,

@@ -53,10 +53,11 @@ locally (step 3); a kit with pages has frames that new content can go into.
 **No Storybook.** Propose one of these to the person, through the Orchestrator
 when you work for one, in a short message with your recommendation:
 
-- (a) **add Storybook** with stories for the components the main screens use,
-  covering their default, empty, loading, error and long-content states. For
-  React with Vite or Next.js, `npx storybook@8 init` sets it up; write the
-  stories next to the components;
+- (a) **add Storybook** with stories for the components, covering their
+  default, empty, loading, error and long-content states: follow
+  `npx --yes @codepress/design-kit storybook-guide`, which installs a pinned
+  Storybook, writes a stories file next to each component, and adds the
+  `stories` section to the config `init` wrote;
 - (b) **capture real pages** from the dev server (step 3);
 - (c) **both**.
 
@@ -64,7 +65,7 @@ When nobody answers, do (b), plus (a) for components that are clearly reusable
 (buttons, inputs, cards, dialogs, tables that several screens share). Say in the
 pull request which you did and why.
 
-**Supported first:** Storybook 7 and 8 static builds of any renderer, page
+**Supported first:** Storybook 7, 8 and 9 static builds of any renderer, page
 capture of any URL, and new stories for React only. For another stack (Vue,
 Svelte, Angular, an older Storybook), capture pages and say honestly in the
 pull request that new stories were not written, and why.

@@ -16,6 +16,12 @@ The kit is configured in `{{CONFIG}}` and built by the `Design kit` workflow
 (`.github/workflows/design-kit.yml`). The format and every command are in the
 `{{PACKAGE}}` README.
 
+When this repository has Storybook and you add a component or change what
+one renders, add or update its story in the same pull request, covering its
+default, every variant and size, and the empty, loading, error and long-text
+states that apply, so the next kit captures it. A component without a story
+is missing from every kit until it gets one.
+
 ## 1. Fetch the newest kit
 
 The workflow runs once a day and on demand (`workflow_dispatch`), and uploads

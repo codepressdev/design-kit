@@ -53,6 +53,7 @@ try {
     "src/index.d.ts",
     "schema/design-kit.config.schema.json",
     "skills/design-kit-setup/SKILL.md",
+    "skills/storybook-setup/SKILL.md",
     "README.md",
     "LICENSE",
     "package.json",

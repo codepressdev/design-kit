@@ -1,5 +1,5 @@
 /**
- * `design-kit capture stories`: every story of a Storybook 7/8 static build
+ * `design-kit capture stories`: every story of a Storybook 7, 8 or 9 static build
  * rendered to static HTML, the CSS the preview loaded, the fonts, an index
  * and kit.mjs.
  *

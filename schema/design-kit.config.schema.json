@@ -66,7 +66,7 @@
     "stories": {
       "type": "object",
       "additionalProperties": false,
-      "description": "`design-kit capture stories`: every story of a Storybook 7 or 8 static build.",
+      "description": "`design-kit capture stories`: every story of a Storybook 7, 8 or 9 static build.",
       "properties": {
         "root": {
           "type": "string",

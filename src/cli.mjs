@@ -17,12 +17,18 @@ const SETUP_GUIDE = new URL(
   import.meta.url,
 );
 
+/** The `storybook-setup` skill, printed by `design-kit storybook-guide`. */
+const STORYBOOK_GUIDE = new URL(
+  "../skills/storybook-setup/SKILL.md",
+  import.meta.url,
+);
+
 const USAGE = `usage: design-kit <command> [options]
 
   init              set a kit up in this repository: the config, a daily
                     GitHub Actions build, and a skill for its agents
       [--root <dir>] [--dry-run] [--force]
-  capture stories   capture every story of a Storybook 7/8 static build
+  capture stories   capture every story of a Storybook 7-9 static build
       [--config <file>] [--out <dir>] [--storybook-dir <dir>]
       [--only <id,...> | --only-file <file>] [--base <previous kit>]
   capture pages     capture the configured pages of a running app
@@ -35,6 +41,9 @@ const USAGE = `usage: design-kit <command> [options]
       [--config <file>]
   setup-guide       print the guide for setting a kit up in a repository as
                     one reviewable pull request (an agent skill)
+  storybook-guide   print the guide for adding Storybook, with stories for
+                    every existing component, as one reviewable pull request
+                    (an agent skill)
 
 The config is the nearest design-kit.config.json at or above the working
 directory unless --config names one. Exit codes: 0 done, 1 a capture could
@@ -181,6 +190,11 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     if (command === "setup-guide") {
       parse(argv.slice(1), {});
       process.stdout.write(readFileSync(SETUP_GUIDE, "utf8"));
+      return 0;
+    }
+    if (command === "storybook-guide") {
+      parse(argv.slice(1), {});
+      process.stdout.write(readFileSync(STORYBOOK_GUIDE, "utf8"));
       return 0;
     }
     if (command === "validate") {

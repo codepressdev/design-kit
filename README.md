@@ -24,6 +24,86 @@ It runs on Node 20 or later. Playwright is a peer dependency, so the capture
 drives the Playwright and Chromium your project already has. The `kit`
 commands need neither.
 
+## Set it up with your agent
+
+The quickest way in is to let your coding agent do the whole setup. Paste this
+into Claude Code, Codex, Cursor or any agent that can run commands in your
+repository:
+
+```text
+Set up a design kit in this repository. Run
+`npx --yes @codepress/design-kit setup-guide` and follow what it prints.
+Open one pull request and don't merge it.
+```
+
+`setup-guide` prints the setup skill that ships in this package, so the agent
+needs nothing installed beforehand. Following it, the agent:
+
+1. Runs `init`, which detects your stack and writes the config, the daily
+   workflow and the agent skill (see [Set up in your repository](#set-up-in-your-repository)).
+2. Fills in the pages to capture: the command that starts your app, and three
+   to eight main screens, each with a selector that shows when it has loaded.
+3. Decides between Storybook stories and real pages. With Storybook, it
+   captures every story. Without it, it asks you whether to add Storybook,
+   capture your real pages, or both. When nobody answers, it captures pages and
+   writes stories for the components several screens share.
+4. Wires sign-in, when your pages need one, through a seeded test user and the
+   repository secrets `DESIGN_KIT_USERNAME` and `DESIGN_KIT_PASSWORD`. It never
+   writes a credential; the pull request says which secrets to add.
+5. Builds the kit once, checks what it captured, and opens the pull request
+   with the counts, any gaps and a screenshot of one composed screen.
+
+No Storybook yet and you want one? Ask for it on its own, before or after the
+kit:
+
+```text
+Set up Storybook in this repository, with stories for our components. Run
+`npx --yes @codepress/design-kit storybook-guide` and follow what it prints.
+Open one pull request and don't merge it.
+```
+
+`storybook-guide` prints a second skill. The agent installs Storybook 9 (8 for
+older apps) without changing your React, Next.js or TypeScript versions,
+writes a stories file next to each component covering every variant and the
+empty, loading, error and long-text states, adds a tokens story, and lists
+anything it skipped, with the reason. React with Vite or Next.js is supported
+first; on another stack the agent says plainly what it did not try.
+
+Once the pull request merges, the daily workflow uploads the kit, and the
+`design-kit` skill it installed tells your agents to use it. Ask for a mockup
+the way you would ask a designer:
+
+```text
+Mock up a Billing tab on our settings page, using the design kit.
+```
+
+The agent fetches the newest kit, composes the screen from your real frame and
+components, and draws only what is new.
+
+## Keeping the kit in sync
+
+Nothing needs re-running after setup.
+
+- **It rebuilds itself.** The workflow `init` wrote
+  (`.github/workflows/design-kit.yml`) builds the kit every day, and on
+  demand from "Run workflow" in the Actions tab or with
+  `gh workflow run design-kit.yml`. A day with no new commits since the last
+  kit is skipped. Each kit is kept for 30 days.
+- **It captures what exists at that commit.** Every build captures the
+  stories and pages that exist at the commit it runs on. It never writes
+  stories, so a new component shows up in the kit once it has a story. With
+  `gaps.componentGlob` set, every component without one is listed in the
+  kit's `gaps.json`. The `design-kit` skill and `storybook-guide` ask agents
+  to add or update a component's story in the same pull request as the
+  component.
+- **Agents always use the newest kit.** The installed `design-kit` skill
+  fetches the newest kit each time. When UI commits have landed since that
+  kit was built, the mockup's caption says so.
+- **Re-run `init` only to start over** (`--force`). To pick up a new release
+  of this package, update the pinned version in the workflow
+  (`DESIGN_KIT_PACKAGE`); the "Run workflow" form's `package` input tries
+  another version for one run.
+
 ## Set up in your repository
 
 `design-kit init` sets a kit up as one reviewable change. Run it in the
@@ -118,7 +198,7 @@ needs no config.
 
 ### `stories`
 
-Captures every story of a Storybook 7 or 8 static build (any renderer). The
+Captures every story of a Storybook 7, 8 or 9 static build (any renderer). The
 build comes from `--storybook-dir`, `storybookDir`, or `buildCommand`, which
 writes `staticDir`; without `staticDir`, `{out}` in the command names a
 temporary folder that is removed afterwards.
@@ -177,14 +257,28 @@ design-kit capture pages   [--config f] [--out dir] [--base-url url] [--only nam
 design-kit kit info|find|show|compose ...   [--kit dir]
 design-kit validate        [--config f]
 design-kit setup-guide
+design-kit storybook-guide
 ```
 
 `setup-guide` prints the agent skill for setting a kit up in a repository
 that has none, as one reviewable pull request: run `init`, decide between
 Storybook stories and page capture, wire sign-in through repository secrets,
 build the kit once and report what it captured. An agent without the skill
-installed can run `npx --yes @codepress/design-kit@0.1.3 setup-guide` and
+installed can run `npx --yes @codepress/design-kit setup-guide` and
 follow what it prints.
+
+`storybook-guide` prints the agent skill for a repository with no Storybook,
+or one with components that have no stories, as one reviewable pull request.
+The agent surveys the components and tokens, installs Storybook 9 (8 for
+older apps) pinned to the repository's React, Next.js and TypeScript, and fixes
+the usual first-build failures: peer-dependency conflicts, modules that throw
+on a missing environment variable, `next/font`, `next/image` and SVG imports,
+and `public/` assets. It writes one stories file per component, covering
+every variant and the empty, loading, error and long-text states, adds a
+tokens story, and lists anything it skipped, with the reason. It typechecks,
+builds Storybook and checks that `capture stories` captures it. An existing
+Storybook is extended, never re-initialised. React with Vite or Next.js is
+supported first. Run `npx --yes @codepress/design-kit storybook-guide`.
 
 `--only` re-captures just those stories (Storybook ids, with or without the
 `story:` prefix and width) and copies every other row from `--base`, byte for
