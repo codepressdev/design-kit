@@ -280,6 +280,12 @@
           "description": "The page's source module, shown by `kit show` and searched by `kit find`."
         },
         "slots": { "$ref": "#/$defs/slots" },
+        "widths": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "integer", "minimum": 1 },
+          "description": "Only these of `pages.widths`, for a page the app draws at some sizes only (a laptop-only rail tab). Default: every width."
+        },
         "layoutSlots": {
           "type": "object",
           "description": "Slots for a layout the detector reports, replacing `slots` there.",

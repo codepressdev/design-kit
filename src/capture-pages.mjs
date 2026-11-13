@@ -543,6 +543,7 @@ export async function capturePages(config, options = {}) {
     for (const viewport of settings.widths) {
       for (const page of pages) {
         if (session.interrupted) return 130;
+        if (page.widths && !page.widths.includes(viewport.width)) continue;
         const id = kitRouteId(page.name, viewport.width);
         const context = await session.browser.newContext({
           baseURL: baseUrl,

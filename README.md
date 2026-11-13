@@ -356,7 +356,7 @@ fresh browser context, signed in from `auth.storageState` (a Playwright
 storage state file) or from the state the `auth.setup` module's default
 export returns (`async ({ browser, baseUrl, config }) => state`).
 
-- `pages[]`: `{name, title?, path, ready, sourceFile?, slots, layoutSlots?}`.
+- `pages[]`: `{name, title?, path, ready, sourceFile?, slots, layoutSlots?, widths?}`. `widths` names which of `pages.widths` a page is captured at, for a view the app draws at some sizes only; it defaults to all of them.
   `ready` is a Playwright selector that shows once the page has its content.
   `slots` names the regions a mockup replaces: the first selector that matches
   a visible, non-empty element gets `data-kit-slot="<name>"`, and `main` is
