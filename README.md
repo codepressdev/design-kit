@@ -563,10 +563,61 @@ the frame, the snippet ids and how many `data-kit-new` elements the page has.
 The record stays in the page: `kit.mjs` makes no network call. Scripts, event handlers,
 `<link>`s and SVG animation are removed, and URLs pass an allowlist: only
 relative references, fragments and `data:` survive, read the way the browser
-reads them. `--theme dark` applies the manifest's theme. Elements marked
-`data-kit-new` get a visible outline with `--show-new`. An unknown frame, slot
+reads them. The one exception is your own code: an inline `<script>` (no
+`src`) in a `--slot` fragment file is kept in place, with only its `type` and
+`id`. Nothing executable from the kit's captured markup survives, a fragment's
+`<script src>` is removed, and `on…=` handlers are removed everywhere, your
+fragments included. `--theme dark` applies the manifest's theme. Elements marked
+`data-kit-new` get a visible outline with `--show-new`, and behaviour triggers
+(below) a blue one. An unknown frame, slot
 or snippet id exits 2, naming near matches. `--kit <dir>` (or
 `DESIGN_KIT_DIR`) points at a kit other than the tool's own folder.
+
+### Clickable mockups
+
+A composed page can switch tabs, open and close menus and swap between a
+component's captured states on click or tap. Mark it up with these attributes
+in your slot fragment, and `compose` inlines a small behaviour script once, at
+the end of the body (no network, no storage; it works in a
+`sandbox="allow-scripts"` frame). A page that uses none of them composes
+exactly as before.
+
+| Attribute                                       | What a click does                                                                                                                                                                                    |
+| ----------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `data-kit-toggle="<id>"` on a trigger           | Shows or hides the element with that id and sets `aria-expanded`. A click outside it, or Esc, closes what a toggle opened.                                                                           |
+| `data-kit-tabs` on a container                  | Its `[data-kit-tab="<name>"]` triggers show the matching `[data-kit-panel="<name>"]` and hide the others, with `aria-selected`. The first tab starts selected unless one has `aria-selected="true"`. |
+| `data-kit-state="<group>:<name>"` on each state | Nothing by itself: the group starts in the state of its first element without `hidden`.                                                                                                              |
+| `data-kit-set="<group>:<name>"` on a trigger    | Shows every element of the group in that state and hides the rest of the group.                                                                                                                      |
+
+To make captured stories interactive, compose each state as its own snippet
+and put the attributes on the `<kit-snippet>`: they (and `hidden`) are copied
+onto every top-level element the snippet expands to, a story's portal
+included.
+
+```html
+<kit-snippet
+  id="story:primitives-dropdownmenu--closed@1280"
+  data-kit-state="menu:closed"
+  data-kit-set="menu:open"
+></kit-snippet>
+<kit-snippet
+  id="story:primitives-dropdownmenu--open@1280"
+  data-kit-state="menu:open"
+  data-kit-set="menu:closed"
+  hidden
+></kit-snippet>
+```
+
+A click anywhere on the closed story shows the open one, and a click on the
+open one goes back. Links and buttons inside a trigger only switch the state;
+they do not navigate or submit. A trigger that already has `data-state`
+(Radix-style markup) gets `open`/`closed` or `active`/`inactive` there too, so
+its own styling follows, and a trigger that is not a button or link gets
+`tabindex="0"` so Enter and Space work. Elements the behaviours hide are
+hidden even when their own CSS sets a `display`. Native interactivity needs
+nothing: `<details>`/`<summary>`, `popover` with `popovertarget`, form
+controls and `aria-*` all survive compose. Anything else is a few lines of
+your own `<script>` in the fragment.
 
 ## Programmatic use
 

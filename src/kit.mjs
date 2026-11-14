@@ -12,6 +12,7 @@
  * `--kit <dir>` (or DESIGN_KIT_DIR) points at a kit; the default is the
  * folder this file sits in. Format: the @codepress/design-kit README.
  */
+import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { basename, dirname, extname, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -185,9 +186,32 @@ function parseAttributes(source) {
   const pattern = /([^\s"'>/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+)))?/g;
   let match;
   while ((match = pattern.exec(source))) {
-    attrs[match[1].toLowerCase()] = match[2] ?? match[3] ?? match[4] ?? "";
+    const name = match[1].toLowerCase();
+    // The browser keeps the first of two same-named attributes, so the
+    // sanitizer must check that one: `<img src="https://…" src="a.png">`
+    // loads the remote one.
+    if (!Object.hasOwn(attrs, name))
+      attrs[name] = match[2] ?? match[3] ?? match[4] ?? "";
   }
   return attrs;
+}
+
+/**
+ * Where the comment opening at `lt` ends, as the browser reads it: `<!-->`
+ * and `<!--->` are empty comments, and `--!>` closes a comment as well as
+ * `-->`. Reading a comment as longer than the browser does would let markup
+ * after its real end pass the sanitizer as comment text.
+ */
+function commentEnd(html, lt) {
+  if (html.startsWith(">", lt + 4)) return lt + 5;
+  if (html.startsWith("->", lt + 4)) return lt + 6;
+  const ends = [
+    [html.indexOf("-->", lt + 4), 3],
+    [html.indexOf("--!>", lt + 4), 4],
+  ].filter(([at]) => at >= 0);
+  if (!ends.length) return html.length;
+  const [at, length] = ends.reduce((a, b) => (b[0] < a[0] ? b : a));
+  return at + length;
 }
 
 /** Tokens with offsets: open / close / text / comment. */
@@ -207,10 +231,8 @@ function* scan(html) {
     }
     if (lt > i) yield { type: "text", start: i, end: lt };
     if (html.startsWith("<!--", lt)) {
-      const close = html.indexOf("-->", lt + 4);
-      const end = close < 0 ? html.length : close + 3;
-      yield { type: "comment", start: lt, end };
-      i = end;
+      yield { type: "comment", start: lt, end: commentEnd(html, lt) };
+      i = commentEnd(html, lt);
       continue;
     }
     const closing = html[lt + 1] === "/";
@@ -339,6 +361,8 @@ const DROPPED = new Set(["script", "link", "base", "meta", "set", "animate"]);
 /** Dropped with everything inside them: scripts, and SVG animation, which can
  *  set an href to a remote URL after load. */
 const DROPPED_WITH_CONTENT = new Set(["script", "set", "animate"]);
+/** Elements this scanner reads as raw text that foreign content parses as markup. */
+const RAW_TEXT = new Set(["style", "title", "textarea"]);
 
 /**
  * Named character references the decoder knows: every HTML name for an ASCII
@@ -528,10 +552,23 @@ export function sanitizeMarkup(html) {
   for (let t = 0; t < tokens.length; t += 1) {
     const token = tokens[t];
     if (token.type !== "open") continue;
-    if (DROPPED.has(token.name)) {
+    // Inside <svg> or <math> the browser parses a <style>, <title> or
+    // <textarea>'s content as markup (`<svg><style><img onerror=…>`), where
+    // this scanner reads raw text. One whose text holds anything tag-like is
+    // dropped with its content, wherever it sits.
+    const text = tokens[t + 1];
+    const markupInRaw =
+      RAW_TEXT.has(token.name) &&
+      !token.selfClosing &&
+      text?.type === "text" &&
+      /<[a-z!/?]/i.test(html.slice(text.start, text.end));
+    if (DROPPED.has(token.name) || markupInRaw) {
       out += html.slice(i, token.start);
       i = token.end;
-      if (DROPPED_WITH_CONTENT.has(token.name) && !token.selfClosing) {
+      if (
+        (DROPPED_WITH_CONTENT.has(token.name) || markupInRaw) &&
+        !token.selfClosing
+      ) {
         const close = tokens.findIndex(
           (n, k) => k > t && n.type === "close" && n.name === token.name,
         );
@@ -594,7 +631,6 @@ export function sanitizeMarkup(html) {
       out += `${html.slice(i, token.start)}<${token.name}${attrs}${token.selfClosing && !VOID.has(token.name) ? " /" : ""}>`;
       i = token.end;
     }
-    const text = tokens[t + 1];
     if (token.name === "style" && text?.type === "text") {
       out +=
         html.slice(i, text.start) +
@@ -709,6 +745,254 @@ export function inlineAssets(kit, css, cssDir = join(kit.dir, "css")) {
   );
 }
 
+// ── behaviours (clickable mockups) ──────────────────────────────────────────
+
+/** Attributes that make compose inline the behaviour script. */
+const BEHAVIOUR_ATTRS = [
+  "data-kit-toggle",
+  "data-kit-tabs",
+  "data-kit-tab",
+  "data-kit-panel",
+  "data-kit-state",
+  "data-kit-set",
+];
+
+/**
+ * Hides what the behaviours hide even when the element's own CSS sets a
+ * display (a captured story root with `display:flex` would ignore `hidden`).
+ * The script marks toggle targets with `data-kit-target`.
+ */
+const BEHAVIOURS_CSS =
+  "\n[data-kit-panel][hidden],[data-kit-state][hidden],[data-kit-target][hidden]{display:none !important}";
+
+/** --show-new outlines behaviour triggers too, in a second colour. */
+const SHOW_TRIGGERS_CSS =
+  "\n[data-kit-toggle],[data-kit-tab],[data-kit-set]{outline:2px dashed #0090ff !important;outline-offset:2px}";
+
+/**
+ * The behaviour layer compose inlines once, at the end of the body, when the
+ * page uses one of BEHAVIOUR_ATTRS. Plain DOM, no network and no storage, so
+ * it runs in a `sandbox="allow-scripts"` frame with an opaque origin.
+ *
+ * - `data-kit-toggle="<id>"`: a click shows or hides the element with that
+ *   id and sets `aria-expanded` on its triggers; a click outside it, or Esc,
+ *   closes what a toggle opened.
+ * - `data-kit-tabs` holds `[data-kit-tab="<name>"]` triggers and
+ *   `[data-kit-panel="<name>"]` panels; a click shows its panel, hides the
+ *   others and sets `aria-selected`.
+ * - `data-kit-set="<group>:<name>"` shows every `[data-kit-state]` of the
+ *   group in that state and hides the rest of the group.
+ *
+ * A trigger that already has `data-state` (Radix-style markup) gets
+ * open/closed or active/inactive there as well, so its captured styling
+ * follows. Triggers that are not focusable get `tabindex="0"`, and Enter or
+ * Space clicks them.
+ */
+const BEHAVIOURS_JS = `(function () {
+  "use strict";
+  if (window.__designKitBehaviours) return;
+  window.__designKitBehaviours = true;
+  var doc = document;
+  var TRIGGERS = "[data-kit-toggle],[data-kit-tab],[data-kit-set]";
+  var NATIVE = /^(A|BUTTON|INPUT|SELECT|TEXTAREA|SUMMARY)$/;
+  var opened = [];
+  function list(selector, root) {
+    return Array.prototype.slice.call((root || doc).querySelectorAll(selector));
+  }
+  function show(el, on) {
+    if (on) el.removeAttribute("hidden");
+    else el.setAttribute("hidden", "");
+  }
+  function pair(value) {
+    var at = (value || "").indexOf(":");
+    return at > 0 ? [value.slice(0, at), value.slice(at + 1)] : null;
+  }
+  function mirror(el, value) {
+    if (el.hasAttribute("data-state")) el.setAttribute("data-state", value);
+  }
+  function focusable(el) {
+    if (NATIVE.test(el.tagName) || el.hasAttribute("tabindex")) return;
+    el.setAttribute("tabindex", "0");
+    if (!el.hasAttribute("role")) {
+      el.setAttribute("role", el.hasAttribute("data-kit-tab") ? "tab" : "button");
+    }
+  }
+
+  function triggersOf(id) {
+    return list("[data-kit-toggle]").filter(function (t) {
+      return t.getAttribute("data-kit-toggle") === id;
+    });
+  }
+  function setOpen(target, open) {
+    show(target, open);
+    triggersOf(target.id).forEach(function (t) {
+      t.setAttribute("aria-expanded", open ? "true" : "false");
+      mirror(t, open ? "open" : "closed");
+    });
+    var at = opened.indexOf(target);
+    if (open && at < 0) opened.push(target);
+    if (!open && at >= 0) opened.splice(at, 1);
+  }
+  function closeOpened(clicked) {
+    opened.slice().forEach(function (target) {
+      var inside =
+        clicked &&
+        (target.contains(clicked) ||
+          triggersOf(target.id).some(function (t) {
+            return t.contains(clicked);
+          }));
+      if (!inside) setOpen(target, false);
+    });
+  }
+
+  function own(box, selector) {
+    return list(selector, box).filter(function (el) {
+      return el.closest("[data-kit-tabs]") === box;
+    });
+  }
+  function selectTab(box, name) {
+    own(box, "[data-kit-tab]").forEach(function (t) {
+      var on = t.getAttribute("data-kit-tab") === name;
+      t.setAttribute("aria-selected", on ? "true" : "false");
+      mirror(t, on ? "active" : "inactive");
+    });
+    own(box, "[data-kit-panel]").forEach(function (p) {
+      var on = p.getAttribute("data-kit-panel") === name;
+      show(p, on);
+      mirror(p, on ? "active" : "inactive");
+    });
+  }
+
+  function setState(group, name) {
+    list("[data-kit-state]").forEach(function (el) {
+      var state = pair(el.getAttribute("data-kit-state"));
+      if (state && state[0] === group) show(el, state[1] === name);
+    });
+  }
+
+  list("[data-kit-toggle]").forEach(function (t) {
+    focusable(t);
+    var target = doc.getElementById(t.getAttribute("data-kit-toggle"));
+    if (!target) return;
+    target.setAttribute("data-kit-target", "");
+    t.setAttribute("aria-controls", target.id);
+    t.setAttribute("aria-expanded", target.hasAttribute("hidden") ? "false" : "true");
+  });
+  list("[data-kit-tabs]").forEach(function (box) {
+    var tabs = own(box, "[data-kit-tab]");
+    if (!tabs.length) return;
+    tabs.forEach(focusable);
+    var current = tabs.filter(function (t) {
+      return t.getAttribute("aria-selected") === "true" || t.getAttribute("data-state") === "active";
+    })[0] || tabs[0];
+    selectTab(box, current.getAttribute("data-kit-tab"));
+  });
+  // Each group starts in the state of its first visible element.
+  var groups = Object.create(null);
+  list("[data-kit-state]").forEach(function (el) {
+    var state = pair(el.getAttribute("data-kit-state"));
+    if (state && !(state[0] in groups) && !el.hasAttribute("hidden")) groups[state[0]] = state[1];
+  });
+  Object.keys(groups).forEach(function (group) {
+    setState(group, groups[group]);
+  });
+  list("[data-kit-set]").forEach(focusable);
+
+  doc.addEventListener("click", function (event) {
+    var el = event.target;
+    if (!el || !el.closest) return;
+    closeOpened(el);
+    var trigger = el.closest(TRIGGERS);
+    if (!trigger) return;
+    // A link or button in a trigger (a captured story's own links) would
+    // navigate the mockup away or submit; the click only switches state.
+    var control = el.closest("a,button");
+    if (control && trigger.contains(control)) event.preventDefault();
+    var state = pair(trigger.getAttribute("data-kit-set"));
+    if (state) setState(state[0], state[1]);
+    var box = trigger.hasAttribute("data-kit-tab") && trigger.closest("[data-kit-tabs]");
+    if (box) selectTab(box, trigger.getAttribute("data-kit-tab"));
+    if (trigger.hasAttribute("data-kit-toggle")) {
+      var target = doc.getElementById(trigger.getAttribute("data-kit-toggle"));
+      if (target) setOpen(target, target.hasAttribute("hidden"));
+    }
+  });
+  doc.addEventListener("keydown", function (event) {
+    var el = event.target;
+    if (event.key === "Escape" && opened.length) {
+      var back = triggersOf(opened[opened.length - 1].id)[0];
+      closeOpened(null);
+      if (back && back.focus) back.focus();
+      return;
+    }
+    if (
+      (event.key === "Enter" || event.key === " ") &&
+      el && el.matches && el.matches(TRIGGERS) && !NATIVE.test(el.tagName)
+    ) {
+      event.preventDefault();
+      el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    }
+  });
+})();`;
+
+/**
+ * The author's own inline scripts in a slot fragment, held out of compose:
+ * each becomes a comment placeholder carrying `key` (random per compose, so
+ * kit markup cannot name one) before snippets expand and the sanitizer runs,
+ * and comes back after. A script with `src`, `href` or `xlink:href` stays in
+ * place for the sanitizer to drop, as does an unterminated one and an earlier
+ * compose's behaviour script (compose inlines a fresh one). Only `type` and
+ * `id` are kept on the tag.
+ */
+function holdAuthorScripts(content, key, held) {
+  if (!/<script/i.test(content)) return content;
+  const tokens = tokenize(content);
+  let out = "";
+  let i = 0;
+  for (let t = 0; t < tokens.length; t += 1) {
+    const token = tokens[t];
+    if (token.type !== "open" || token.name !== "script" || token.selfClosing)
+      continue;
+    let close = t + 1;
+    if (tokens[close]?.type === "text") close += 1;
+    if (tokens[close]?.type !== "close" || tokens[close].name !== "script")
+      continue;
+    t = close;
+    const attrs = token.attrs;
+    if (
+      ["src", "href", "xlink:href", "data-kit-behaviours"].some((name) =>
+        Object.hasOwn(attrs, name),
+      )
+    )
+      continue;
+    const kept = ["type", "id"]
+      .filter((name) => Object.hasOwn(attrs, name))
+      .map((name) => ` ${name}="${escapeAttr(decodeEntities(attrs[name]))}"`)
+      .join("");
+    out += `${content.slice(i, token.start)}<!--kit-author-script ${key} ${held.length}-->`;
+    held.push(
+      `<script${kept}>${content.slice(token.end, tokens[close].start)}</script>`,
+    );
+    i = tokens[close].end;
+  }
+  return out + content.slice(i);
+}
+
+/** Each held script back in its placeholder's place, once. */
+function restoreAuthorScripts(html, key, held) {
+  if (!held.length) return html;
+  const placed = new Set();
+  return html.replace(
+    new RegExp(`<!--kit-author-script ${key} (\\d+)-->`, "g"),
+    (_, n) => {
+      const index = Number(n);
+      if (placed.has(index) || index >= held.length) return "";
+      placed.add(index);
+      return held[index];
+    },
+  );
+}
+
 // ── compose ─────────────────────────────────────────────────────────────────
 
 /**
@@ -717,21 +1001,35 @@ export function inlineAssets(kit, css, cssDir = join(kit.dir, "css")) {
  * nested `<kit-snippet>` at the top is left alone: its own expansion stamps
  * the elements that replace it.
  */
-function stampSnippetRoots(html, id) {
-  const roots = elements(html).filter(
-    (e) =>
-      e.depth === 0 &&
-      e.name !== "kit-snippet" &&
-      !("data-kit-snippet" in e.attrs),
-  );
+function stampSnippetRoots(html, id, carried = "") {
   let out = "";
   let i = 0;
-  for (const root of roots) {
+  for (const root of elements(html)) {
+    if (root.depth !== 0) continue;
+    const stamp =
+      root.name !== "kit-snippet" && !("data-kit-snippet" in root.attrs)
+        ? ` data-kit-snippet="${escapeAttr(id)}"`
+        : "";
+    if (!stamp && !carried) continue;
     const at = root.start + 1 + root.name.length;
-    out += `${html.slice(i, at)} data-kit-snippet="${escapeAttr(id)}"`;
+    out += `${html.slice(i, at)}${stamp}${carried}`;
     i = at;
   }
   return out + html.slice(i);
+}
+
+/**
+ * The behaviour attributes a `<kit-snippet>` passes on to the top-level
+ * elements of the markup it expands to, so a captured story can be one state
+ * of a group (`data-kit-state`), a trigger, a tab or a panel. They go first
+ * in the tag, so they win over any the captured element already has.
+ */
+const CARRIED_ATTRS = ["hidden", ...BEHAVIOUR_ATTRS];
+
+function carriedAttributes(attrs) {
+  return CARRIED_ATTRS.filter((name) => Object.hasOwn(attrs, name))
+    .map((name) => ` ${name}="${escapeAttr(decodeEntities(attrs[name]))}"`)
+    .join("");
 }
 
 function expandSnippets(kit, html, used, budget, depth = 0, ids = []) {
@@ -763,7 +1061,7 @@ function expandSnippets(kit, html, used, budget, depth = 0, ids = []) {
       html.slice(i, element.start) +
       expandSnippets(
         kit,
-        stampSnippetRoots(markup, row.id),
+        stampSnippetRoots(markup, row.id, carriedAttributes(element.attrs)),
         used,
         budget,
         depth + 1,
@@ -887,7 +1185,10 @@ function attributes(captured, extraClass, theme, choice, target, fixed) {
 /**
  * One self-contained page: the frame's markup with slots filled and
  * snippets expanded, its CSS (and that of any other source a snippet came
- * from) inlined with fonts as data URIs, and no scripts or remote URLs.
+ * from) inlined with fonts as data URIs, and no remote URLs. The only
+ * scripts are the inline ones the slot fragments brought and, when the page
+ * uses a behaviour attribute, the behaviour layer; nothing executable from
+ * the kit's own markup survives.
  */
 export function compose(
   kit,
@@ -904,9 +1205,19 @@ export function compose(
     throw new KitError(`unknown theme "${theme}". Use light or dark.`);
   }
   const used = new Set([rowCssFile(kit, row)]);
-  const filled = fillSlots(kit, row, readSnippet(kit, row), slots);
+  // The author's inline scripts sit out the sanitizer; everything else in
+  // the fragments (handlers, remote scripts, snippets) goes through it.
+  const scriptKey = randomBytes(16).toString("hex");
+  const heldScripts = [];
+  const authored = Array.isArray(slots)
+    ? slots.map((slot) => ({
+        ...slot,
+        content: holdAuthorScripts(slot.content, scriptKey, heldScripts),
+      }))
+    : slots;
+  const filled = fillSlots(kit, row, readSnippet(kit, row), authored);
   const snippetIds = [];
-  const body = sanitizeMarkup(
+  const sanitized = sanitizeMarkup(
     expandSnippets(
       kit,
       filled,
@@ -916,6 +1227,11 @@ export function compose(
       snippetIds,
     ),
   );
+  const bodyElements = elements(sanitized);
+  const behaves = bodyElements.some((e) =>
+    BEHAVIOUR_ATTRS.some((name) => Object.hasOwn(e.attrs, name)),
+  );
+  const body = restoreAuthorScripts(sanitized, scriptKey, heldScripts);
 
   // Stories' sheet first, then the route sheets, as before page sources.
   const storiesCss = cssFile(kit, "stories");
@@ -931,8 +1247,14 @@ export function compose(
       return inlineAssets(kit, readFileSync(file, "utf8"), dirname(file));
     })
     .join("\n");
-  const showNewCss = showNew
-    ? "\n[data-kit-new]{outline:2px dashed #e5484d !important;outline-offset:2px}"
+  const showNewCss =
+    (showNew
+      ? "\n[data-kit-new]{outline:2px dashed #e5484d !important;outline-offset:2px}"
+      : "") +
+    (behaves ? BEHAVIOURS_CSS : "") +
+    (showNew && behaves ? SHOW_TRIGGERS_CSS : "");
+  const behaviourScript = behaves
+    ? `<script data-kit-behaviours>\n${BEHAVIOURS_JS}\n</script>\n`
     : "";
 
   const switcher = kitTheme(kit.manifest);
@@ -956,7 +1278,7 @@ export function compose(
     kit_sha: sha,
     frame,
     snippets: snippetIds,
-    new_parts: elements(body).filter((e) => "data-kit-new" in e.attrs).length,
+    new_parts: bodyElements.filter((e) => "data-kit-new" in e.attrs).length,
   };
   const page = `<!doctype html>
 <html${htmlAttrs}>
@@ -971,7 +1293,7 @@ ${sanitizeCss(css)}${showNewCss}
 </head>
 <body${bodyAttrs}>
 ${body}
-</body>
+${behaviourScript}</body>
 </html>
 `;
   return page;
