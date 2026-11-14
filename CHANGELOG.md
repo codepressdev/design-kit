@@ -1,5 +1,11 @@
 # @codepress/design-kit
 
+## 0.10.0
+
+### Minor Changes
+
+- 8c590f6: Composed mockups can be clickable. `kit.mjs compose` keeps the inline `<script>` elements in your `--slot` fragment files (only `type` and `id` stay on the tag), while everything from the kit's captured markup is sanitized as before; a fragment's `<script src>` and every `on…=` handler are still removed. A page that uses `data-kit-toggle="<id>"` (show or hide an element; outside click and Esc close it), `data-kit-tabs` with `data-kit-tab`/`data-kit-panel`, or `data-kit-state="<group>:<name>"` with `data-kit-set` triggers gets a small dependency-free behaviour script inlined once, which needs no network and runs in a `sandbox="allow-scripts"` frame. Behaviour attributes and `hidden` on a `<kit-snippet>` carry onto the elements it expands to, so two captured story states become one switchable group. `--show-new` also outlines behaviour triggers. The sanitizer now checks the first of two same-named attributes, the one the browser uses. It also ends a comment where the browser does (`--!>`, `<!-->` and `<!--->`), and drops a `<style>`, `<title>` or `<textarea>` whose content holds markup, which SVG and MathML would parse as elements; before, captured markup could run script through either. A page with no behaviour attributes and no author scripts composes byte for byte as before.
+
 ## 0.9.0
 
 ### Minor Changes
