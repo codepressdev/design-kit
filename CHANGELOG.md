@@ -1,5 +1,11 @@
 # @codepress/design-kit
 
+## 0.11.0
+
+### Minor Changes
+
+- d118c2b: `kit compose` inlines only the CSS a page can use: style rules whose every selector needs a class or id the page lacks are dropped (inside `@media`, `@supports`, `@layer`, `@container` and `@scope` too), and a rule repeated in the same context is written once. A composed screen drops from megabytes to a few hundred KB with identical pixels. `--css full` (option `css: "full"`) keeps every rule.
+
 ## 0.10.0
 
 ### Minor Changes
