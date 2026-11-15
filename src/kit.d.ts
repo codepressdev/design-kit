@@ -95,8 +95,20 @@ export function compose(
     showNew?: boolean;
     /** Bytes of markup the page may grow to through snippets. */
     maxBytes?: number;
+    /**
+     * `pruned` (the default) keeps only the CSS rules the page's classes and
+     * ids can use, each repeated rule once; `full` keeps every rule.
+     */
+    css?: "pruned" | "full";
   },
 ): string;
+
+/**
+ * The stylesheet without the style rules that need a class or id missing
+ * from `names`, and with each rule repeated in the same at-rule context
+ * written once (its last copy).
+ */
+export function pruneCss(css: string, names: Set<string>): string;
 
 /** The default `maxBytes` of `compose`: 32 MB. */
 export const COMPOSE_MAX_BYTES: number;

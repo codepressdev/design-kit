@@ -69,7 +69,7 @@ test("placeholder-shaped text in a fragment cannot claim an author script", () =
   assert.equal((html.match(/window\.a = 1/g) ?? []).length, 1);
 });
 
-test("without behaviour attributes or author scripts, compose output is byte for byte what it was", () => {
+test("without behaviour attributes or author scripts, compose --css full output is byte for byte what it was", () => {
   const slot = `<section data-kit-new class="new-panel">New panel</section>
 <kit-snippet id="story:primitives-dialog--open@1280"></kit-snippet>`;
   // sha256 of each page as composed before behaviours existed (0.9.0).
@@ -109,7 +109,7 @@ test("without behaviour attributes or author scripts, compose output is byte for
     ],
   ];
   for (const [options, expected] of cases) {
-    const html = compose(kit, options);
+    const html = compose(kit, { ...options, css: "full" });
     assert.equal(
       createHash("sha256").update(html).digest("hex"),
       expected,

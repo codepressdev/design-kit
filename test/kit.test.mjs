@@ -84,6 +84,8 @@ test("compose fills a route slot, expands snippets from both sources and stays s
     "route:orchestrator@1280",
     "--slot",
     `main=${slot}`,
+    "--css",
+    "full",
   ]);
 
   assert.match(page, /New panel/);
@@ -261,6 +263,8 @@ test("a story frame keeps its root and Storybook layout class, with stories.css 
   const page = composeToString([
     "--frame",
     "story:primitives-dialog--open@1280",
+    "--css",
+    "full",
   ]);
   assert.match(page, /<body class="sb-main-centered sb-show-main">/);
   assert.match(page, /<div id="storybook-root">/);
@@ -634,7 +638,7 @@ test("any relative url() that names a file in the kit is inlined, anything else 
 .frag{filter:url(#f)}`,
   );
   const page = composeToString(
-    ["--frame", "story:shell-iconrail--default@1280"],
+    ["--frame", "story:shell-iconrail--default@1280", "--css", "full"],
     dir,
   );
   assert.match(page, /url\("data:font\/woff;base64,V09GRg=="\)/);

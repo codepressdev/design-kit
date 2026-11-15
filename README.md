@@ -531,7 +531,7 @@ node kit.mjs find button             # ≤ 30 lines: id, kind, width, bytes, tit
 node kit.mjs find "transfer app"     # the words on screen work too
 node kit.mjs show <id> [--full]      # path, size and an outline (≤ 2 KB) or the markup
 node kit.mjs compose --frame route:dashboard@1280 --slot main=new.html \
-  [--theme light|dark] [--show-new] --out page.html
+  [--theme light|dark] [--show-new] [--css pruned|full] --out page.html
 ```
 
 `find` lists the rows holding every word of the query in their id, title,
@@ -572,6 +572,23 @@ fragments included. `--theme dark` applies the manifest's theme. Elements marked
 (below) a blue one. An unknown frame, slot
 or snippet id exits 2, naming near matches. `--kit <dir>` (or
 `DESIGN_KIT_DIR`) points at a kit other than the tool's own folder.
+
+`compose` inlines only the CSS the page can use. Once the body is final, it
+collects every class and id on the page's elements (hidden ones and
+`<template>` content included), every word in your inline scripts (so a class
+a script adds keeps its rules) and the theme classes. A style rule is dropped
+only when every selector in its list needs a class or id the page lacks;
+pseudo-classes, pseudo-elements, attribute parts and the arguments of `:is`,
+`:where`, `:has` and `:not` never count, and escapes (`hover\:bg-muted`,
+`w-\[38px\]`) are read as the browser reads them. Rules inside `@media`,
+`@supports`, `@layer`, `@container` and `@scope` are pruned the same way and
+an emptied block goes (a named `@layer` stays, since it sets the layer
+order). `@font-face`, `@keyframes`, `@property`, other at-rules and rules with
+no class or id are kept as written. A rule repeated in the same at-rule
+context is written once, its last copy. A composed screen drops from
+megabytes to a few hundred KB with identical pixels. A class your script
+builds from pieces (`"is-" + state`) is not seen; `--css full` (option
+`css: "full"`) keeps every rule, as before 0.11.
 
 ### Clickable mockups
 

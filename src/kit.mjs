@@ -7,7 +7,7 @@
  *   node kit.mjs find <query>        (ids, titles and the words on screen)
  *   node kit.mjs show <id> [--full]
  *   node kit.mjs compose --frame <id> [--slot <name>=<file>]… [--theme light|dark]
- *                        [--show-new] --out <file>
+ *                        [--show-new] [--css pruned|full] --out <file>
  *
  * `--kit <dir>` (or DESIGN_KIT_DIR) points at a kit; the default is the
  * folder this file sits in. Format: the @codepress/design-kit README.
@@ -993,6 +993,348 @@ function restoreAuthorScripts(html, key, held) {
   );
 }
 
+// ── CSS pruning ─────────────────────────────────────────────────────────────
+//
+// A composed page carries the kit's whole stylesheets, megabytes of rules for
+// classes the page never names. compose keeps only the rules a page can use:
+// a style rule goes only when every selector in its list needs a class or id
+// the page lacks, and of rules repeated in the same at-rule context only the
+// last stays (it is the one the cascade uses). Everything else (@font-face,
+// @keyframes, @property, rules with no class or id) stays as written.
+
+/** At-rules whose blocks hold rules that are pruned like the top level. */
+const CSS_WRAPPERS = new Set([
+  "media",
+  "supports",
+  "layer",
+  "container",
+  "scope",
+]);
+
+const CSS_IDENT_CHAR = /[A-Za-z0-9_\-\u0080-￿]/;
+
+/**
+ * Where the CSS token at `i` ends when it is one whose characters never count
+ * as structure (an escape, a comment, a string or an unquoted `url(…)`);
+ * otherwise -1.
+ */
+function cssSkip(css, i) {
+  const ch = css[i];
+  if (ch === "\\") return Math.min(i + 2, css.length);
+  if (ch === "/" && css[i + 1] === "*") {
+    const end = css.indexOf("*/", i + 2);
+    return end < 0 ? css.length : end + 2;
+  }
+  if (ch === '"' || ch === "'") {
+    let j = i + 1;
+    while (j < css.length) {
+      const c = css[j];
+      if (c === "\\") j += 2;
+      else if (c === ch) return j + 1;
+      // An unterminated string ends at the line's end, as the browser reads it.
+      else if (c === "\n") return j;
+      else j += 1;
+    }
+    return css.length;
+  }
+  if (
+    (ch === "u" || ch === "U") &&
+    (i === 0 || !CSS_IDENT_CHAR.test(css[i - 1])) &&
+    /^url\(\s*[^\s"')]/i.test(css.slice(i, i + 64))
+  ) {
+    let j = css.indexOf("(", i) + 1;
+    while (j < css.length && css[j] !== ")") j += css[j] === "\\" ? 2 : 1;
+    return Math.min(j + 1, css.length);
+  }
+  return -1;
+}
+
+/** The first `{`, `;` or `}` outside brackets from `i`, or `end`. */
+function cssPreludeEnd(css, i, end) {
+  let nested = 0;
+  while (i < end) {
+    const skip = cssSkip(css, i);
+    if (skip >= 0) {
+      i = skip;
+      continue;
+    }
+    const ch = css[i];
+    if (ch === "(" || ch === "[") nested += 1;
+    else if ((ch === ")" || ch === "]") && nested > 0) nested -= 1;
+    else if (!nested && (ch === "{" || ch === ";" || ch === "}")) return i;
+    i += 1;
+  }
+  return end;
+}
+
+/** Just past the `}` that closes the block opening at `open`, or -1. */
+function cssBlockEnd(css, open, end) {
+  let depth = 0;
+  let i = open;
+  while (i < end) {
+    const skip = cssSkip(css, i);
+    if (skip >= 0) {
+      i = skip;
+      continue;
+    }
+    if (css[i] === "{") depth += 1;
+    else if (css[i] === "}" && --depth === 0) return i + 1;
+    i += 1;
+  }
+  return -1;
+}
+
+/**
+ * A list of rules as nodes: `rule` (a style rule, kept or dropped whole),
+ * `wrapper` (an at-rule from CSS_WRAPPERS, pruned inside) and `keep`
+ * (everything else, written back as it was). Comments between rules go.
+ */
+function parseCssList(css, start, end) {
+  const nodes = [];
+  let i = start;
+  while (i < end) {
+    const ch = css[i];
+    if (/\s/.test(ch)) {
+      i += 1;
+      continue;
+    }
+    if (ch === "/" && css[i + 1] === "*") {
+      i = cssSkip(css, i);
+      continue;
+    }
+    const stop = cssPreludeEnd(css, i, end);
+    if (stop >= end || css[stop] !== "{") {
+      // A statement (`@layer a, b;`) or junk the browser skips: as written.
+      const through = Math.min(stop + 1, end);
+      nodes.push({ type: "keep", text: css.slice(i, through) });
+      i = through;
+      continue;
+    }
+    const closedAt = cssBlockEnd(css, stop, end);
+    const closed = closedAt >= 0;
+    const blockEnd = closed ? closedAt : end;
+    const prelude = css.slice(i, stop);
+    const atRule = /^@([A-Za-z-]+)/.exec(prelude);
+    const name = atRule?.[1].toLowerCase();
+    if (name && CSS_WRAPPERS.has(name)) {
+      const layerName = prelude.slice(atRule[0].length).trim();
+      nodes.push({
+        type: "wrapper",
+        head: css.slice(i, stop + 1),
+        // A named layer's first block sets the layer order, so even an
+        // emptied one stays; each unnamed layer is a layer of its own.
+        named: name === "layer" && layerName !== "",
+        anonymous: name === "layer" && layerName === "",
+        children: parseCssList(css, stop + 1, closed ? blockEnd - 1 : blockEnd),
+      });
+    } else if (name) {
+      nodes.push({ type: "keep", text: css.slice(i, blockEnd) });
+    } else {
+      nodes.push({ type: "rule", prelude, text: css.slice(i, blockEnd) });
+    }
+    i = blockEnd;
+  }
+  return nodes;
+}
+
+/**
+ * A rule's text with comments gone and whitespace outside strings collapsed,
+ * so the same rule written by two sheets compares equal.
+ */
+function cssKey(text) {
+  let out = "";
+  // Whether `out` ends in an escape, string or url(): its last character is
+  // then not the punctuation it looks like (`.\\{ .a` keeps its space).
+  let quoted = false;
+  let i = 0;
+  while (i < text.length) {
+    const skip = cssSkip(text, i);
+    if (skip >= 0) {
+      if (text[i] !== "/") {
+        out += text.slice(i, skip);
+        quoted = true;
+      }
+      i = skip;
+      continue;
+    }
+    if (/\s/.test(text[i])) {
+      while (i < text.length && /\s/.test(text[i])) i += 1;
+      const afterPunctuation = !quoted && /[{};,]$/.test(out);
+      if (!afterPunctuation && !/^[{};,]/.test(text[i] ?? "")) out += " ";
+      continue;
+    }
+    out += text[i];
+    quoted = false;
+    i += 1;
+  }
+  return out.trim();
+}
+
+/** The parts of a selector list, split on commas outside brackets. */
+function selectorParts(prelude) {
+  const parts = [];
+  let nested = 0;
+  let from = 0;
+  let i = 0;
+  while (i < prelude.length) {
+    const skip = cssSkip(prelude, i);
+    if (skip >= 0) {
+      i = skip;
+      continue;
+    }
+    const ch = prelude[i];
+    if (ch === "(" || ch === "[") nested += 1;
+    else if ((ch === ")" || ch === "]") && nested > 0) nested -= 1;
+    else if (ch === "," && !nested) {
+      parts.push(prelude.slice(from, i));
+      from = i + 1;
+    }
+    i += 1;
+  }
+  parts.push(prelude.slice(from));
+  return parts;
+}
+
+/** Just past the bracket closing the one at `i`. */
+function closeBracket(text, i) {
+  let depth = 0;
+  while (i < text.length) {
+    const skip = cssSkip(text, i);
+    if (skip >= 0) {
+      i = skip;
+      continue;
+    }
+    const ch = text[i];
+    if (ch === "(" || ch === "[") depth += 1;
+    else if ((ch === ")" || ch === "]") && --depth === 0) return i + 1;
+    i += 1;
+  }
+  return text.length;
+}
+
+/** The identifier at `i`, escapes resolved, and where it ends. */
+function readCssIdent(text, i) {
+  let j = i;
+  while (j < text.length) {
+    if (text[j] === "\\" && j + 1 < text.length && text[j + 1] !== "\n") {
+      const hex = /^[0-9a-fA-F]{1,6}\s?/.exec(text.slice(j + 1, j + 8));
+      j += 1 + (hex ? hex[0].length : 1);
+    } else if (CSS_IDENT_CHAR.test(text[j])) j += 1;
+    else break;
+  }
+  return [unescapeCss(text.slice(i, j)), j];
+}
+
+/**
+ * Whether one selector can match on the page: every class and id it needs is
+ * there. Attribute parts and the arguments of functional pseudo-classes and
+ * pseudo-elements (`:is`, `:where`, `:has`, `:not`, `::part`, …) never count.
+ */
+function selectorCanMatch(selector, names) {
+  let i = 0;
+  while (i < selector.length) {
+    const ch = selector[i];
+    if (ch === "[" || ch === "(") {
+      i = closeBracket(selector, i);
+      continue;
+    }
+    const skip = cssSkip(selector, i);
+    if (skip >= 0) {
+      i = skip;
+      continue;
+    }
+    if (ch === "." || ch === "#") {
+      const [name, next] = readCssIdent(selector, i + 1);
+      if (name && !names.has(name)) return false;
+      i = Math.max(next, i + 1);
+      continue;
+    }
+    if (CSS_IDENT_CHAR.test(ch)) {
+      // A tag name or pseudo name: read whole, so a `.` cannot start inside.
+      i = readCssIdent(selector, i)[1];
+      continue;
+    }
+    i += 1;
+  }
+  return true;
+}
+
+/**
+ * Kept rules as text, last-first so the last copy of a repeated rule is the
+ * one kept. `context` names the at-rules around them; `seen` is shared.
+ */
+function prunedCss(nodes, names, context, seen, counter) {
+  const out = [];
+  for (let n = nodes.length - 1; n >= 0; n -= 1) {
+    const node = nodes[n];
+    if (node.type === "rule") {
+      if (
+        !selectorParts(node.prelude).some((part) =>
+          selectorCanMatch(part, names),
+        )
+      )
+        continue;
+      const key = `${context}\u0000${cssKey(node.text)}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(node.text);
+    } else if (node.type === "wrapper") {
+      const inner = prunedCss(
+        node.children,
+        names,
+        `${context}\u0001${cssKey(node.head)}${node.anonymous ? `#${(counter.n += 1)}` : ""}`,
+        seen,
+        counter,
+      );
+      if (!inner.length && !node.named) continue;
+      out.push(`${node.head}\n${inner.join("\n")}\n}`);
+    } else {
+      out.push(node.text);
+    }
+  }
+  return out.reverse();
+}
+
+/**
+ * The stylesheet with every style rule no element can match removed and
+ * repeated rules written once (see the section comment). `names` holds every
+ * class and id the page can have.
+ */
+export function pruneCss(css, names) {
+  return prunedCss(parseCssList(css, 0, css.length), names, "", new Set(), {
+    n: 0,
+  }).join("\n");
+}
+
+/**
+ * Every class and id a composed page can show: those on its elements (hidden
+ * ones and <template> content included), every word in the author's own
+ * scripts (one may add a class), and the theme classes.
+ */
+function pageNames(elementList, scripts, theme) {
+  const names = new Set(["dark", "light"]);
+  if (theme.attribute === "class") {
+    for (const value of [theme.dark, theme.light]) if (value) names.add(value);
+  }
+  for (const element of elementList) {
+    const { class: classes, id } = element.attrs;
+    if (classes) {
+      for (const name of decodeEntities(classes).split(/[\t\n\f\r ]+/)) {
+        if (name) names.add(name);
+      }
+    }
+    if (id) names.add(decodeEntities(id));
+  }
+  for (const script of scripts) {
+    for (const word of script.split(/[\s"'`]+/)) {
+      if (!word) continue;
+      names.add(word);
+      names.add(word.replace(/^[.#]+/, ""));
+    }
+  }
+  return names;
+}
+
 // ── compose ─────────────────────────────────────────────────────────────────
 
 /**
@@ -1185,7 +1527,9 @@ function attributes(captured, extraClass, theme, choice, target, fixed) {
 /**
  * One self-contained page: the frame's markup with slots filled and
  * snippets expanded, its CSS (and that of any other source a snippet came
- * from) inlined with fonts as data URIs, and no remote URLs. The only
+ * from) inlined with fonts as data URIs, and no remote URLs. Only the rules
+ * the page's classes and ids can use are kept, each once (see pruneCss);
+ * `css: "full"` keeps every rule. The only
  * scripts are the inline ones the slot fragments brought and, when the page
  * uses a behaviour attribute, the behaviour layer; nothing executable from
  * the kit's own markup survives.
@@ -1198,11 +1542,15 @@ export function compose(
     theme = "light",
     showNew = false,
     maxBytes = COMPOSE_MAX_BYTES,
+    css: cssMode = "pruned",
   },
 ) {
   const row = requireRow(kit, frame, "frame");
   if (theme !== "light" && theme !== "dark") {
     throw new KitError(`unknown theme "${theme}". Use light or dark.`);
+  }
+  if (cssMode !== "pruned" && cssMode !== "full") {
+    throw new KitError(`unknown css "${cssMode}". Use pruned or full.`);
   }
   const used = new Set([rowCssFile(kit, row)]);
   // The author's inline scripts sit out the sanitizer; everything else in
@@ -1272,6 +1620,23 @@ export function compose(
     "body",
     {},
   );
+  // The kit's CSS, cut to the rules this page's classes and ids can use
+  // (`css: "full"` keeps every rule).
+  const safeCss = sanitizeCss(css);
+  const pageCss =
+    cssMode === "full"
+      ? safeCss
+      : pruneCss(
+          safeCss,
+          pageNames(
+            [
+              ...bodyElements,
+              ...elements(`<html${htmlAttrs}><body${bodyAttrs}>`),
+            ],
+            heldScripts,
+            switcher,
+          ),
+        );
   // What this page used, for whoever wants to count it later. Recorded in
   // the page only; kit.mjs never sends it anywhere.
   const usage = {
@@ -1288,7 +1653,7 @@ export function compose(
 <meta name="design-kit-usage" content="${escapeAttr(JSON.stringify(usage))}">
 <title>${escapeAttr(row.title ?? frame)}</title>
 <style>
-${sanitizeCss(css)}${showNewCss}
+${pageCss}${showNewCss}
 </style>
 </head>
 <body${bodyAttrs}>
@@ -1652,7 +2017,9 @@ const USAGE = `usage: kit.mjs [--kit <dir>] <command>
   info                         print the manifest
   find <query>                 list up to ${FIND_LIMIT} rows whose id, title or on-screen text holds every word
   show <id> [--full]           path, size and an outline (--full: the markup)
-  compose --frame <id> [--slot <name>=<file>]… [--theme light|dark] [--show-new] --out <file>`;
+  compose --frame <id> [--slot <name>=<file>]… [--theme light|dark] [--show-new] [--css pruned|full] --out <file>
+                               --css full keeps every rule of the kit's CSS; the default
+                               keeps only rules the page's classes and ids can use`;
 
 function parseArgs(argv) {
   const options = { slots: [], positional: [] };
@@ -1669,6 +2036,7 @@ function parseArgs(argv) {
     else if (arg === "--slot") options.slots.push(value());
     else if (arg === "--theme") options.theme = value();
     else if (arg === "--out") options.out = value();
+    else if (arg === "--css") options.css = value();
     else if (arg === "--full") options.full = true;
     else if (arg === "--show-new") options.showNew = true;
     else if (arg === "--help" || arg === "-h") options.help = true;
@@ -1718,6 +2086,7 @@ export function run(
         slots,
         theme: options.theme ?? "light",
         showNew: options.showNew,
+        css: options.css ?? "pruned",
       });
       writeFileSync(resolve(options.out), page);
       io.out(

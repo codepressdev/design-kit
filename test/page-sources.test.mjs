@@ -196,6 +196,7 @@ test("a frame composes with its own source's stylesheet", () => {
   const page = compose(loadKit(kit), {
     frame: "route:terminal-workspace@1280",
     slots: {},
+    css: "full",
   });
   assert.match(page, /\.terminal\{\}/);
   assert.doesNotMatch(page, /\.web\{\}/);
