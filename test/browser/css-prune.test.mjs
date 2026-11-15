@@ -5,7 +5,13 @@
  * only an author script adds). Run with `pnpm test:browser`.
  */
 import assert from "node:assert/strict";
-import { appendFileSync, cpSync, mkdtempSync, rmSync } from "node:fs";
+import {
+  appendFileSync,
+  cpSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
@@ -16,7 +22,9 @@ import { chromium } from "@playwright/test";
 import { compose, loadKit } from "../../src/kit.mjs";
 
 // The fixture kit plus visible styles for the parts the interactions show,
-// and theme rules, so a wrongly pruned rule changes pixels.
+// and theme rules, so a wrongly pruned rule changes pixels. The padding keeps
+// each revealed element's text inside its box: Chromium repaints a shown
+// element's box, and glyph ink outside it may or may not be repainted yet.
 const dir = mkdtempSync(join(tmpdir(), "design-kit-prune-browser-"));
 cpSync(fileURLToPath(new URL("../fixtures/kit", import.meta.url)), dir, {
   recursive: true,
@@ -27,9 +35,9 @@ appendFileSync(
 .light body,.light .surface{background:rgb(250,250,250)}
 .dark body,.dark .surface{background:rgb(20,20,20);color:white}
 .surface{display:block;padding:12px}
-.state-panel{display:block;width:120px;height:40px;background:rgb(200,40,40)}
-.menu-list{width:160px;height:60px;background:rgb(40,160,40);margin:0}
-.script-only{width:200px;height:30px;background:rgb(40,40,200)}
+.state-panel{display:block;width:120px;height:40px;padding:4px;background:rgb(200,40,40)}
+.menu-list{width:160px;height:60px;padding:4px 24px;background:rgb(40,160,40);margin:0}
+.script-only{width:200px;height:30px;padding:4px;background:rgb(40,40,200)}
 @media (max-width:500px){.state-panel{width:60px}}
 .never-used{display:none!important}
 `,
@@ -74,11 +82,49 @@ async function shoot(html, width, act) {
     const page = await context.newPage();
     await page.setContent(html, { waitUntil: "load" });
     await page.evaluate(() => document.fonts.ready);
-    if (act) await act(page);
-    return await page.screenshot({ fullPage: true });
+    if (act) {
+      await act(page);
+      // Leave nothing the clicks set that is not the behaviour under test:
+      // the pointer's hover, focus, and any scroll a click made to reach its
+      // target (at 390 the 1280 frame overflows).
+      await page.mouse.move(0, 0);
+      // Text the clicks revealed asks for its font only now; until that
+      // load settles the text is invisible, so wait for it again.
+      await page.evaluate(async () => {
+        document.activeElement?.blur?.();
+        window.scrollTo(0, 0);
+        void document.body.offsetHeight;
+        await document.fonts.ready;
+      });
+    }
+    // Every element's computed style, which is all pruning can change.
+    const styles = await page.evaluate(() =>
+      [...document.querySelectorAll("*")].map((el) => {
+        const style = getComputedStyle(el);
+        return `${el.tagName}: ${[...style].map((name) => `${name}=${style.getPropertyValue(name)}`).join(";")}`;
+      }),
+    );
+    return { styles, png: await page.screenshot({ fullPage: true }) };
   } finally {
     await context.close();
   }
+}
+
+/**
+ * The same computed style on every element, then the same pixels. A pixel
+ * difference keeps both PNGs (next to the test's kit copy, printed) to look at.
+ */
+function sameRendering(pruned, full, what) {
+  assert.deepEqual(
+    pruned.styles,
+    full.styles,
+    `${what}: computed styles differ`,
+  );
+  if (pruned.png.equals(full.png)) return;
+  const out = mkdtempSync(join(tmpdir(), "design-kit-prune-diff-"));
+  writeFileSync(join(out, "pruned.png"), pruned.png);
+  writeFileSync(join(out, "full.png"), full.png);
+  assert.fail(`${what}: pixels differ (PNGs in ${out})`);
 }
 
 test("pruned and full CSS draw the same pixels for every fixture frame", async () => {
@@ -89,7 +135,7 @@ test("pruned and full CSS draw the same pixels for every fixture frame", async (
       assert.ok(pruned.length < full.length, `${frame} pruned is smaller`);
       for (const width of [1280, 390]) {
         const [a, b] = [await shoot(pruned, width), await shoot(full, width)];
-        assert.ok(a.equals(b), `${frame} ${theme} ${width}: pixels differ`);
+        sameRendering(a, b, `${frame} ${theme} ${width}`);
       }
     }
   }
@@ -109,7 +155,7 @@ test("after showing a hidden state, opening a toggle menu and an author script's
     for (const width of [1280, 390]) {
       const a = await shoot(pruned, width, act);
       const b = await shoot(full, width, act);
-      assert.ok(a.equals(b), `${theme} ${width}: pixels differ`);
+      sameRendering(a, b, `after the clicks, ${theme} ${width}`);
     }
   }
   // And the styles really applied, so the comparison saw them.
