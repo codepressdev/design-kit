@@ -1,5 +1,11 @@
 # @codepress/design-kit
 
+## 0.13.0
+
+### Minor Changes
+
+- e019828: `design-kit fetch --url <download_url> --sha <commit>` installs a kit from a download URL with no key or config, into the same `$TMPDIR/design-kit-<sha>` cache (reused without downloading), checking the manifest's sha and renaming into place atomically. `fetch` now prints the kit's summary line after `path=`, `sha=` and `branch=`. New `kit.mjs figure --img <file> [--href] [--caption] [--alt] [--width] --out <file>` writes a self-contained `<figure>` with the image as a data URI; `kitSummaryLine` is exported from `@codepress/design-kit/kit`.
+
 ## 0.12.0
 
 ### Minor Changes
