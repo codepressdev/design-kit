@@ -44,7 +44,7 @@ test("a copied kit runs its kit.mjs with plain node and no node_modules", () => 
       encoding: "utf8",
       env: { PATH: process.env.PATH },
     });
-  assert.match(node(["info"]), /rows: 39/);
+  assert.match(node(["info"]), /· stories 38 · routes 1 ·/);
   assert.match(
     node(["compose", "--frame", "route:orchestrator@1280", "--out", page]),
     /page\.html/,

@@ -193,7 +193,7 @@ test('find "transfer app" returns the page that shows it, with an excerpt, thoug
   assert.equal(found.code, 0, found.err);
   assert.equal(
     found.out,
-    'route:app-settings@1280  route  1280w  504 B  app-settings  "…t variables Danger zone Transfer app Delete… No secrets yet…"',
+    'route:app-settings@1280  504 B  "…t variables Danger zone Transfer app Delete… No secrets yet…"',
   );
   const [match] = findMatches(loadKit(out), "Environment variables");
   assert.equal(match.row.id, "route:app-settings@1280");
@@ -286,22 +286,22 @@ test("a word only inside a script, a style, an SVG or an attribute value matches
   }
 });
 
-test("a kit without text.json finds exactly as before, and loads without text", () => {
+test("a kit without text.json finds by name only, and loads without text", () => {
   const dir = scratchDir("old-kit");
   cpSync(FIXTURE, dir, { recursive: true });
   assert.equal(existsSync(join(dir, "text.json")), false);
   assert.equal("text" in loadKit(dir), false);
-  // The lines the find before text.json printed, byte for byte.
+  // Names only: no row carries an excerpt.
   assert.equal(
     kit(["find", "orchestrator"], dir).out,
     [
-      "route:orchestrator@1280  route  1280w  194 B  Orchestrator",
-      "story:orchestrator-feed--long@1280  story  1280w  24.2 KB  Orchestrator/Feed/Long",
+      "route:orchestrator@1280  194 B",
+      "story:orchestrator-feed--long@1280  24 KB",
     ].join("\n"),
   );
   assert.equal(
     kit(["find", "dialog"], dir).out,
-    "story:primitives-dialog--open@1280  story  1280w  681 B  Primitives/Dialog/Open",
+    "story:primitives-dialog--open@1280  681 B",
   );
   const missing = kit(["find", "transfer"], dir);
   assert.equal(missing.code, 2);
@@ -311,7 +311,7 @@ test("a kit without text.json finds exactly as before, and loads without text", 
   assert.equal("text" in loadKit(dir), false);
   assert.equal(
     kit(["find", "dialog"], dir).out,
-    "story:primitives-dialog--open@1280  story  1280w  681 B  Primitives/Dialog/Open",
+    "story:primitives-dialog--open@1280  681 B",
   );
 });
 

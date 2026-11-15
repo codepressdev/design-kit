@@ -526,23 +526,45 @@ keeps the kit's totals and adds `page_sources.<source>` with each one's own.
 The tool needs only Node: no install and no network.
 
 ```bash
-node kit.mjs info                    # the manifest
-node kit.mjs find button             # ≤ 30 lines: id, kind, width, bytes, title
+node kit.mjs info [--json]           # one line: sha, build time, counts (--json: the manifest)
+node kit.mjs find button             # ≤ 30 lines: id (widths grouped), size, title
 node kit.mjs find "transfer app"     # the words on screen work too
 node kit.mjs show <id> [--full]      # path, size and an outline (≤ 2 KB) or the markup
 node kit.mjs compose --frame route:dashboard@1280 --slot main=new.html \
   [--theme light|dark] [--show-new] [--css pruned|full] --out page.html
 ```
 
-`find` lists the rows holding every word of the query in their id, title,
+`info` prints one line, such as
+`480e11d built 2026-11-15T18:58:59.954Z · stories 12821 · routes 133 · failed 13`,
+and names the failed ids from `gaps.json` when there are five or fewer;
+`info --json` prints `manifest.json` as it is.
+
+`find` prints one line per frame: rows that differ only by `@<width>` share
+it, with the widths in braces and one size per width (or one size when they
+print the same), for example
+`route:orchestrator@{1280,390}  131/136 KB  Orchestrator project`. A frame
+captured at one width prints its plain id. The title is left out when it only
+restates the id (`Chat/SubAgentBlock/Orchestrator Row` for
+`story:chat-subagentblock--orchestrator-row`), and a route's trailing
+` (1280)` is dropped; a frame whose widths have different titles prints each,
+separated by `|`. `find` lists the rows holding every word of the query in their id, title,
 component, source file or visible text. Rows with the words in the id come
 first, then the title, component or source file, then the text only; among
 rows that tie, one whose text holds the whole query comes first. A row found
 only through its text ends with a quoted excerpt of about 60 characters
 around the words, so you see why it matched. When more rows match than the
 30 lines hold, rows found by name fill the list but its last 5 lines are kept
-for rows found by text, and the closing line counts what each left out
-(`+37 more by name, +3 more by on-screen text; narrow the query`). The text
+for rows found by text, and the closing line counts the rows each left out
+(`+37 more by name, +3 more by on-screen text; narrow the query`). The
+formatter is exported as `findMatchLines(matches)` from
+`@codepress/design-kit/kit`, so the cloud Orchestrator's `design_kit_find`
+prints the same lines.
+
+`show` prints the row's header (id, kind and size, title, file, source,
+slots) and an outline of at most 2 KB: one line per element down to depth 4,
+a run of identical siblings (each with what is nested under it) printed once
+with `×N`, and generated ids (`radix-…`, React's `_r…_` and the capture's
+renumbered `_k…_`) left out. `show --full` prints the markup. The text
 is `text.json`, built
 whenever a capture writes the kit: each row's markup without its scripts,
 styles, SVG, head and templates, tags and attribute values dropped, entities

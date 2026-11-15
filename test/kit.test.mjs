@@ -439,7 +439,7 @@ test("a kit with no route data still finds and composes stories", () => {
   rmSync(join(dir, "html/route--orchestrator@1280.html"));
 
   const info = kit(["info"], dir);
-  assert.match(info.out, /rows: 38 \(stories 38, routes 0\)/);
+  assert.match(info.out, /· stories 38 · routes 0 ·/);
   assert.notEqual(kit(["find", "route:"], dir).code, 0);
   const page = composeToString(
     ["--frame", "story:shell-iconrail--default@1280"],

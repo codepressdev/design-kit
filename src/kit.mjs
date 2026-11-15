@@ -3,7 +3,7 @@
  * The design kit's own tool. It ships inside every kit, so tool and data
  * always match. Pure Node: no dependencies, no network.
  *
- *   node kit.mjs info
+ *   node kit.mjs info [--json]
  *   node kit.mjs find <query>        (ids, titles and the words on screen)
  *   node kit.mjs show <id> [--full]
  *   node kit.mjs compose --frame <id> [--slot <name>=<file>]… [--theme light|dark]
@@ -1834,10 +1834,16 @@ function excerpt(words, at, length) {
 
 // ── show / find / info ──────────────────────────────────────────────────────
 
-export function outline(html, limit = SHOW_LIMIT) {
-  const lines = [];
-  let size = 0;
-  let truncated = false;
+/**
+ * An id attribute a library or React generated (`radix-…`, React's `useId`
+ * values as the capture renumbers them): it changes between builds and says
+ * nothing about the element, so the outline leaves it out.
+ */
+const GENERATED_ID = /^radix-|_r_?[0-9a-z]+_|_k\d+_|:r[0-9a-z]+:/;
+
+/** One outline line per element down to depth 4, with its depth. */
+function outlineEntries(html) {
+  const entries = [];
   for (const element of elements(html)) {
     if (element.depth > 4) continue;
     const classes = (element.attrs.class ?? "")
@@ -1848,10 +1854,71 @@ export function outline(html, limit = SHOW_LIMIT) {
       .join("");
     const marks = ["id", "role", "data-kit-slot", "aria-label", "data-testid"]
       .filter((name) => element.attrs[name])
+      .filter((name) => name !== "id" || !GENERATED_ID.test(element.attrs.id))
       .map((name) => `[${name}=${element.attrs[name].slice(0, 40)}]`)
       .join("");
     const text = element.text.replace(/\s+/g, " ").trim().slice(0, 40);
-    const line = `${"  ".repeat(element.depth)}<${element.name}${classes}${marks}>${text ? ` "${text}"` : ""}`;
+    entries.push({
+      depth: element.depth,
+      line: `${"  ".repeat(element.depth)}<${element.name}${classes}${marks}>${text ? ` "${text}"` : ""}`,
+    });
+  }
+  return entries;
+}
+
+/**
+ * Runs of identical siblings, each with the lines nested under it, printed
+ * once with `×N` after the first line.
+ */
+function collapseRuns(entries) {
+  // ends[i]: the index after the last line nested under line i.
+  const ends = new Array(entries.length).fill(entries.length);
+  const open = [];
+  entries.forEach((entry, i) => {
+    while (open.length && entries[open.at(-1)].depth >= entry.depth)
+      ends[open.pop()] = i;
+    open.push(i);
+  });
+  const same = (a, b, length) => {
+    for (let k = 0; k < length; k += 1)
+      if (entries[a + k].line !== entries[b + k].line) return false;
+    return true;
+  };
+  const lines = [];
+  const walk = (from, to) => {
+    let i = from;
+    while (i < to) {
+      const length = ends[i] - i;
+      let next = ends[i];
+      let count = 1;
+      while (
+        next < to &&
+        entries[next].depth === entries[i].depth &&
+        ends[next] - next === length &&
+        same(i, next, length)
+      ) {
+        count += 1;
+        next = ends[next];
+      }
+      lines.push(`${entries[i].line}${count > 1 ? ` ×${count}` : ""}`);
+      walk(i + 1, ends[i]);
+      i = next;
+    }
+  };
+  walk(0, entries.length);
+  return lines;
+}
+
+/**
+ * A markup outline of at most `limit` bytes: one line per element down to
+ * depth 4, identical sibling runs collapsed to one line with `×N`, and
+ * generated ids left out.
+ */
+export function outline(html, limit = SHOW_LIMIT) {
+  const lines = [];
+  let size = 0;
+  let truncated = false;
+  for (const line of collapseRuns(outlineEntries(html))) {
     // The limit is bytes: an outline line can carry non-ASCII text.
     const bytes = Buffer.byteLength(line) + 1;
     if (size + bytes > limit) {
@@ -1936,6 +2003,124 @@ export function find(kit, query) {
   return findMatches(kit, query).map(({ row }) => row);
 }
 
+/** Letters and digits only, lowercased: how a title can restate an id. */
+function flat(text) {
+  return text.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+/** `story:x@1280` → `story:x`: the id without its width. */
+function baseId(id) {
+  return id.replace(/@\d+$/, "");
+}
+
+/** The width an id ends in, as written. */
+function idWidth(id) {
+  return /@(\d+)$/.exec(id)?.[1] ?? null;
+}
+
+/** Sizes of a width group: `131/136 KB`, `443 B/1.2 KB`, or `4.9 KB` when they print the same. */
+function groupBytes(rows) {
+  const sizes = rows.map((row) => row.bytes ?? 0);
+  const kb = (bytes) =>
+    bytes >= 10 * 1024
+      ? `${Math.round(bytes / 1024)}`
+      : `${(bytes / 1024).toFixed(1)}`;
+  // Widths that print the same size print it once.
+  const once = (values) => [...new Set(values)].join("/");
+  if (sizes.every((bytes) => bytes >= 1024)) return `${once(sizes.map(kb))} KB`;
+  return once(
+    sizes.map((bytes) => (bytes >= 1024 ? `${kb(bytes)} KB` : `${bytes} B`)),
+  );
+}
+
+/**
+ * Matches gathered into lines: rows that differ only by `@<width>` and found
+ * the same way (the same excerpt, or none) share one line, at the place of
+ * the first of them.
+ */
+function widthGroups(matches) {
+  const groups = new Map();
+  for (const match of matches) {
+    // An id without a width never shares a line.
+    const id = match.row.id;
+    const key = `${idWidth(id) ? baseId(id) : `${id}\0`}\0${match.excerpt ?? ""}`;
+    const group = groups.get(key);
+    if (group) group.rows.push(match.row);
+    else groups.set(key, { rows: [match.row], excerpt: match.excerpt });
+  }
+  return [...groups.values()];
+}
+
+/** One find line: id (with its widths), sizes, title unless it restates the id, excerpt. */
+function groupLine({ rows, excerpt: cut }) {
+  const base = baseId(rows[0].id);
+  const widths = rows.map((row) => idWidth(row.id));
+  const id = rows.length === 1 ? rows[0].id : `${base}@{${widths.join(",")}}`;
+  const name = flat(base.replace(/^[a-z]+:/, ""));
+  const titles = [];
+  for (const row of rows) {
+    const title = (row.title ?? "").replace(/\s*\(\d+\)$/, "").trim();
+    if (title && flat(title) !== name && !titles.includes(title))
+      titles.push(title);
+  }
+  return [
+    id,
+    groupBytes(rows),
+    ...(titles.length ? [titles.join(" | ")] : []),
+    ...(cut === undefined ? [] : [`"${cut}"`]),
+  ].join("  ");
+}
+
+/**
+ * `kit find`'s lines for `findMatches` results, at most FIND_LIMIT: rows that
+ * differ only by width share a line (`route:x@{1280,390}`), a title that only
+ * restates the id is left out, and a last line counts the rows not shown.
+ * Rows found by name come first, but a few lines are kept for rows found only
+ * by their on-screen text.
+ */
+export function findMatchLines(matches) {
+  const count = (groups) =>
+    groups.reduce((sum, group) => sum + group.rows.length, 0);
+  // A row with an excerpt was found by on-screen text; any other, by name.
+  const byName = widthGroups(
+    matches.filter((match) => match.excerpt === undefined),
+  );
+  const byText = widthGroups(
+    matches.filter((match) => match.excerpt !== undefined),
+  );
+  // Keep the order findMatches ranked them in when everything fits.
+  if (byName.length + byText.length <= FIND_LIMIT)
+    return widthGroups(matches).map(groupLine);
+  const room = FIND_LIMIT - 1;
+  if (!byText.length) {
+    return [
+      ...byName.slice(0, room).map(groupLine),
+      `… ${count(byName.slice(room))} more; add a word to narrow it`,
+    ];
+  }
+  // Names fill the list first, but the last lines are kept for text hits,
+  // so an agent sees them even when names alone would fill it.
+  const textRoom = Math.min(
+    byText.length,
+    Math.max(FIND_TEXT_LINES, room - byName.length),
+  );
+  const names = byName.slice(0, room - textRoom);
+  const texts = byText.slice(0, room - names.length);
+  const left = [
+    ...(byName.length > names.length
+      ? [`+${count(byName.slice(names.length))} more by name`]
+      : []),
+    ...(byText.length > texts.length
+      ? [`+${count(byText.slice(texts.length))} more by on-screen text`]
+      : []),
+  ];
+  return [
+    ...names.map(groupLine),
+    ...texts.map(groupLine),
+    `${left.join(", ")}; narrow the query`,
+  ];
+}
+
 function findLines(kit, query) {
   const matches = findMatches(kit, query);
   if (!matches.length) {
@@ -1947,40 +2132,7 @@ function findLines(kit, query) {
       `nothing matches "${query}".${near.length ? ` Near: ${near.join(", ")}` : ""}`,
     );
   }
-  const line = ({ row, excerpt: cut }) =>
-    `${row.id}  ${row.kind ?? rowSource(row)}  ${row.width ?? "?"}w  ${formatBytes(row.bytes ?? 0)}  ${row.title ?? ""}${cut === undefined ? "" : `  "${cut}"`}`;
-  if (matches.length <= FIND_LIMIT) return matches.map(line);
-  const room = FIND_LIMIT - 1;
-  // A row with an excerpt was found by on-screen text; any other, by name.
-  const byText = matches.filter((match) => match.excerpt !== undefined);
-  if (!byText.length) {
-    return [
-      ...matches.slice(0, room).map(line),
-      `… ${matches.length - room} more; add a word to narrow it`,
-    ];
-  }
-  // Names fill the list first, but the last lines are kept for text hits,
-  // so an agent sees them even when names alone would fill it.
-  const byName = matches.filter((match) => match.excerpt === undefined);
-  const textRoom = Math.min(
-    byText.length,
-    Math.max(FIND_TEXT_LINES, room - byName.length),
-  );
-  const names = byName.slice(0, room - textRoom);
-  const texts = byText.slice(0, room - names.length);
-  const left = [
-    ...(byName.length > names.length
-      ? [`+${byName.length - names.length} more by name`]
-      : []),
-    ...(byText.length > texts.length
-      ? [`+${byText.length - texts.length} more by on-screen text`]
-      : []),
-  ];
-  return [
-    ...names.map(line),
-    ...texts.map(line),
-    `${left.join(", ")}; narrow the query`,
-  ];
+  return findMatchLines(matches);
 }
 
 function showText(kit, id, full) {
@@ -2003,19 +2155,49 @@ function showText(kit, id, full) {
   return [head, ...lines, ...(truncated ? [tail] : [])].join("\n");
 }
 
-function infoText(kit) {
+/** gaps.json's ids: the frames a capture failed on. */
+function failedIds(dir) {
+  try {
+    const gaps = JSON.parse(readFileSync(join(dir, "gaps.json"), "utf8"));
+    if (!Array.isArray(gaps)) return [];
+    return gaps.map((gap) => gap?.id).filter((id) => typeof id === "string");
+  } catch {
+    // Optional: info prints the count without the ids.
+    return [];
+  }
+}
+
+/**
+ * One line: `sha7 built <iso> · stories N · routes N · failed N`, with the
+ * failed ids when there are five or fewer. `json` prints manifest.json.
+ */
+function infoText(kit, json) {
+  const manifest = kit.manifest ?? { missing: "manifest.json" };
+  if (json) return JSON.stringify(manifest, null, 2);
   const routes = kit.rows.filter((row) => rowSource(row) === "routes").length;
+  const sha = typeof manifest.sha === "string" ? manifest.sha.slice(0, 7) : "";
+  const built =
+    typeof manifest.built_at === "string" ? `built ${manifest.built_at}` : "";
+  const ids = failedIds(kit.dir);
+  const counted = manifest.counts?.failed;
+  const failed = typeof counted === "number" ? counted : ids.length;
+  const head = kit.manifest
+    ? [sha, built].filter(Boolean).join(" ") || "manifest.json"
+    : "no manifest.json";
   return [
-    JSON.stringify(kit.manifest ?? { missing: "manifest.json" }, null, 2),
-    `rows: ${kit.rows.length} (stories ${kit.rows.length - routes}, routes ${routes})`,
-  ].join("\n");
+    head,
+    `stories ${kit.rows.length - routes}`,
+    `routes ${routes}`,
+    `failed ${failed}${failed > 0 && failed <= 5 && ids.length ? ` (${ids.join(", ")})` : ""}`,
+  ].join(" · ");
 }
 
 // ── CLI ─────────────────────────────────────────────────────────────────────
 
 const USAGE = `usage: kit.mjs [--kit <dir>] <command>
-  info                         print the manifest
-  find <query>                 list up to ${FIND_LIMIT} rows whose id, title or on-screen text holds every word
+  info [--json]                sha, build time and counts (--json: the manifest)
+  find <query>                 up to ${FIND_LIMIT} lines of rows whose id, title or on-screen text holds
+                               every word; widths of one frame share a line: id@{1280,390}
   show <id> [--full]           path, size and an outline (--full: the markup)
   compose --frame <id> [--slot <name>=<file>]… [--theme light|dark] [--show-new] [--css pruned|full] --out <file>
                                --css full keeps every rule of the kit's CSS; the default
@@ -2038,6 +2220,7 @@ function parseArgs(argv) {
     else if (arg === "--out") options.out = value();
     else if (arg === "--css") options.css = value();
     else if (arg === "--full") options.full = true;
+    else if (arg === "--json") options.json = true;
     else if (arg === "--show-new") options.showNew = true;
     else if (arg === "--help" || arg === "-h") options.help = true;
     else if (arg.startsWith("--")) throw new KitError(`unknown option ${arg}`);
@@ -2063,7 +2246,7 @@ export function run(
     const dir = resolve(options.kit ?? env.DESIGN_KIT_DIR ?? defaultDir);
     const kit = loadKit(dir);
     if (command === "info") {
-      io.out(infoText(kit));
+      io.out(infoText(kit, options.json));
     } else if (command === "find") {
       if (!rest.length) throw new KitError("find needs a query");
       io.out(findLines(kit, rest.join(" ")).join("\n"));

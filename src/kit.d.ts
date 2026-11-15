@@ -51,6 +51,14 @@ export function findMatches(kit: Kit, query: string): KitMatch[];
 /** The rows of `findMatches`, in the same order. */
 export function find(kit: Kit, query: string): KitRow[];
 
+/**
+ * `kit find`'s lines for `findMatches` results, at most 30: rows that differ
+ * only by width share one line (`route:x@{1280,390}  131/136 KB  Title`), a
+ * title that only restates the id is left out, and when the matches do not
+ * fit, a last line counts the rows not shown.
+ */
+export function findMatchLines(matches: KitMatch[]): string[];
+
 /** Characters of visible text text.json keeps per row: 600. */
 export const TEXT_LIMIT: number;
 

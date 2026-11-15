@@ -71,7 +71,7 @@ is missing.
 ## 3. Find what is real
 
 ```bash
-node "$KIT/kit.mjs" find button          # ≤ 30 lines: id, kind, width, bytes, title
+node "$KIT/kit.mjs" find button          # ≤ 30 lines: id (widths grouped), size, title
 node "$KIT/kit.mjs" show route:home@1280 # path, size and an outline with slots
 ```
 
