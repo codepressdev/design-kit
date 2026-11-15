@@ -1,5 +1,11 @@
 # @codepress/design-kit
 
+## 0.12.0
+
+### Minor Changes
+
+- a386bed: `kit find`, `show` and `info` print far less for the same information. `find` prints one line per frame with its widths grouped (`route:orchestrator@{1280,390}  131/136 KB  Orchestrator project`), drops the kind and width columns and any title that only restates the id; the tail still counts every row not shown. `show` collapses runs of identical siblings to one `×N` line and leaves generated ids out of the outline. `info` prints one line (`sha7 built <iso> · stories N · routes N · failed N`, with the failed ids when five or fewer); `info --json` prints the manifest as before. The find formatter is exported as `findMatchLines`.
+
 ## 0.11.0
 
 ### Minor Changes
