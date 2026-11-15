@@ -397,6 +397,7 @@ design-kit init            [--root dir] [--dry-run] [--force] [--workflow-only]
 design-kit upload          --dir kit [--config f] [--branch b] [--sha commit]
 design-kit fetch           [--branch b] [--out dir] [--config f] [--repo owner/name]
                            [--token-file f]
+design-kit fetch           --url download-url --sha commit [--branch b] [--out dir]
 design-kit latest          [--branch b] [--config f] [--repo owner/name] [--token-file f]
 design-kit capture stories [--config f] [--out dir] [--storybook-dir dir]
                            [--only id,... | --only-file f] [--base previous-kit]
@@ -416,8 +417,19 @@ design-kit storybook-guide
 kit (`codepress`, `s3` and `r2`; with `github` it exits 2, since the
 workflow's upload step does it). `fetch` downloads the newest kit once per
 commit, into `$TMPDIR/design-kit-<sha>` unless `--out` says otherwise, and
-prints `path=`, `sha=` and `branch=`; a second `fetch` of the same commit
-downloads nothing. `latest` prints the newest kit's `sha=` and `created=`.
+prints `path=`, `sha=`, `branch=` and the kit's summary line (as `kit info`
+prints it); a second `fetch` of the same commit downloads nothing.
+`fetch --url <download_url> --sha <commit>` needs no key and no config: it
+installs from a download URL already looked up (with `codepress` storage, the
+`download_url` of the latest route, read through the CodePress Platform MCP)
+into the same cache folder, which it reuses when complete. It streams the zip to
+a scratch folder beside the target, unzips it there, checks that
+`manifest.json` names `--sha`, and renames it into place, so a refused or
+expired URL (`forbidden`), a broken zip (`bad_archive`) or another commit's kit
+(`sha_mismatch`) exits 1 with one line and leaves nothing behind, as does an
+`--out` folder that holds files but no kit (`out_not_empty`, left untouched). Of two
+fetches racing for one commit, the loser keeps the winner's folder. The URL's
+query string is never printed. `latest` prints the newest kit's `sha=` and `created=`.
 Without `--branch` they read the default branch. A store's refusal keeps its
 name (`forbidden`, `no_kit`, `repo_not_connected`, …), a store that cannot be
 reached is `kit_storage_unavailable`, and both exit 1.
@@ -532,7 +544,15 @@ node kit.mjs find "transfer app"     # the words on screen work too
 node kit.mjs show <id> [--full]      # path, size and an outline (≤ 2 KB) or the markup
 node kit.mjs compose --frame route:dashboard@1280 --slot main=new.html \
   [--theme light|dark] [--show-new] [--css pruned|full] --out page.html
+node kit.mjs figure --img shot.png [--href '#cp-page:<key>'] [--caption text] \
+  [--alt text] [--width px] --out figure.html
 ```
+
+`figure` needs no kit: it writes a self-contained `<figure>` fragment with
+the `.png`, `.jpg` or `.webp` image as a data URI, inside a link when `--href`
+is given (a fragment such as `#cp-page:<key>`, which links a plan page to a
+screen page, or a relative link), and the caption and alt text escaped. It
+warns on stderr when the image is over 1 MB.
 
 `info` prints one line, such as
 `480e11d built 2026-11-15T18:58:59.954Z · stories 12821 · routes 133 · failed 13`,

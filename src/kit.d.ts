@@ -134,3 +134,27 @@ export function run(
 
 /** Whether this file is the script node was started with. */
 export function isMain(moduleUrl?: string, script?: string): boolean;
+
+/**
+ * The kit's one-line summary, as `kit info` prints it:
+ * `sha7 built <iso> · stories N · routes N · failed N` (the failed ids when
+ * there are five or fewer).
+ */
+export function kitSummaryLine(kit: Kit): string;
+
+/** Image bytes above which `kit figure` warns: 1 MB. */
+export const FIGURE_WARN_BYTES: number;
+
+/**
+ * `kit figure`'s fragment: a `<figure>` with the image as a data URI, inside
+ * `<a href>` when `href` is given (a fragment such as `#cp-page:<key>` or a
+ * relative link), and the caption escaped. `width` is CSS pixels.
+ */
+export function figureHtml(options: {
+  image: Uint8Array;
+  type: "image/png" | "image/jpeg" | "image/webp";
+  href?: string;
+  caption?: string;
+  alt?: string;
+  width?: string | number;
+}): string;

@@ -35,9 +35,13 @@ const USAGE = `usage: design-kit <command> [options]
                     (codepress, s3 or r2; github uploads in the workflow)
       --dir <kit> [--config <file>] [--branch <name>] [--sha <commit>]
   fetch             download the newest kit, once per commit (cached under
-                    $TMPDIR/design-kit-<sha>); prints path=, sha= and branch=
+                    $TMPDIR/design-kit-<sha>); prints path=, sha=, branch=
+                    and the kit's summary line
       [--branch <name>] [--out <dir>] [--config <file>] [--repo <owner/name>]
       [--token-file <path>]   codepress: the API key, if not CODEPRESS_API_KEY
+      --url <download_url> --sha <commit> [--branch <name>] [--out <dir>]
+                    install from the download_url of the latest route (read
+                    through the Platform MCP): no key and no config needed
   latest            print the newest kit's sha= and created=
       [--branch <name>] [--config <file>] [--repo <owner/name>]
       [--token-file <path>]
@@ -245,7 +249,9 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
         ...(command === "upload"
           ? { dir: "value", sha: "value" }
           : { "token-file": "value" }),
-        ...(command === "fetch" ? { out: "value" } : {}),
+        ...(command === "fetch"
+          ? { out: "value", url: "value", sha: "value" }
+          : {}),
       };
       const options = parse(argv.slice(1), spec);
       const storage = await import("./storage/index.mjs");

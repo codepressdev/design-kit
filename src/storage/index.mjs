@@ -6,6 +6,8 @@
  *     upload({dir, branch, sha}) → {sha, branch, sizeBytes}
  *     fetch({branch, out})      → {path, sha, branch, cached}
  *
+ * `fetchFromUrl` (url.mjs) installs a kit from a download URL with no store.
+ *
  * `github` (the default) is a GitHub Actions artifact; `codepress` is
  * CodePress; `s3` and `r2` are the user's own bucket. The commands
  * `design-kit upload`, `fetch` and `latest` are here too.
@@ -18,6 +20,8 @@ import { bucketStorage } from "./bucket.mjs";
 import { codepressStorage } from "./codepress.mjs";
 import { findRepo, originDefaultBranch } from "./common.mjs";
 import { githubStorage } from "./github.mjs";
+import { fetchFromUrl } from "./url.mjs";
+import { kitSummaryLine, loadKit } from "../kit.mjs";
 
 export { StorageError } from "./common.mjs";
 
@@ -99,25 +103,47 @@ export async function uploadCommand(
 /**
  * `design-kit fetch [--branch b] [--out dir]`: downloads the newest kit
  * (once per commit: it is cached under $TMPDIR/design-kit-<sha>) and prints
- * `path=`, `sha=` and `branch=`.
+ * `path=`, `sha=`, `branch=` and the kit's summary line.
+ *
+ * `--url <download_url> --sha <commit>` installs from a download URL already
+ * looked up (no credential, no config): same cache, same output.
  */
 export async function fetchCommand(
   options,
   { env = process.env, gh, aws } = {},
 ) {
-  const config = loadConfig(options.config);
-  const storage = storageOf(config);
-  const store = storageFor(
-    storage,
-    contextFor(options, config, { env, gh, aws }),
-  );
-  const kit = await store.fetch({
-    branch: readBranch(options, storage, config.configDir),
-    out: options.out,
-  });
+  let kit;
+  if (options.url !== undefined || options.sha !== undefined) {
+    if (!options.url || !options.sha)
+      throw new ConfigError("fetch --url <download_url> needs --sha <commit>");
+    for (const name of ["config", "repo", "token-file"])
+      if (options[name] !== undefined)
+        throw new ConfigError(
+          `fetch --url takes no --${name}: it reads no store`,
+        );
+    kit = await fetchFromUrl({
+      url: options.url,
+      sha: options.sha,
+      branch: options.branch,
+      out: options.out,
+      env,
+    });
+  } else {
+    const config = loadConfig(options.config);
+    const storage = storageOf(config);
+    const store = storageFor(
+      storage,
+      contextFor(options, config, { env, gh, aws }),
+    );
+    kit = await store.fetch({
+      branch: readBranch(options, storage, config.configDir),
+      out: options.out,
+    });
+  }
   console.log(`path=${kit.path}`);
   console.log(`sha=${kit.sha}`);
   if (kit.branch) console.log(`branch=${kit.branch}`);
+  console.log(kitSummaryLine(loadKit(kit.path)));
   return 0;
 }
 

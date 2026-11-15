@@ -236,6 +236,17 @@ test("kit.mjs makes no network call in any command", async () => {
         "--out",
         scratchFile("never.html"),
       ],
+      [
+        "figure",
+        "--img",
+        scratchFile("offline.png", "not really a png"),
+        "--href",
+        "#cp-page:plan",
+        "--caption",
+        "Plan",
+        "--out",
+        scratchFile("offline-figure.html"),
+      ],
     ]) {
       kit(args);
     }

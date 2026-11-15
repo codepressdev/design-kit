@@ -8,6 +8,8 @@
  *   node kit.mjs show <id> [--full]
  *   node kit.mjs compose --frame <id> [--slot <name>=<file>]… [--theme light|dark]
  *                        [--show-new] [--css pruned|full] --out <file>
+ *   node kit.mjs figure --img <file> [--href <#cp-page:key>] [--caption <text>]
+ *                       [--alt <text>] [--width <px>] --out <file>
  *
  * `--kit <dir>` (or DESIGN_KIT_DIR) points at a kit; the default is the
  * folder this file sits in. Format: the @codepress/design-kit README.
@@ -2168,12 +2170,12 @@ function failedIds(dir) {
 }
 
 /**
- * One line: `sha7 built <iso> · stories N · routes N · failed N`, with the
- * failed ids when there are five or fewer. `json` prints manifest.json.
+ * The kit's one-line summary: `sha7 built <iso> · stories N · routes N ·
+ * failed N`, with the failed ids when there are five or fewer. `kit info`
+ * prints it, and so does `design-kit fetch` after `path=`.
  */
-function infoText(kit, json) {
-  const manifest = kit.manifest ?? { missing: "manifest.json" };
-  if (json) return JSON.stringify(manifest, null, 2);
+export function kitSummaryLine(kit) {
+  const manifest = kit.manifest ?? {};
   const routes = kit.rows.filter((row) => rowSource(row) === "routes").length;
   const sha = typeof manifest.sha === "string" ? manifest.sha.slice(0, 7) : "";
   const built =
@@ -2192,6 +2194,99 @@ function infoText(kit, json) {
   ].join(" · ");
 }
 
+/** `info`: the summary line; `json` prints manifest.json. */
+function infoText(kit, json) {
+  if (json)
+    return JSON.stringify(
+      kit.manifest ?? { missing: "manifest.json" },
+      null,
+      2,
+    );
+  return kitSummaryLine(kit);
+}
+
+// ── figure ──────────────────────────────────────────────────────────────────
+
+/** Image types `figure` embeds, by file extension. */
+const FIGURE_TYPES = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".webp": "image/webp",
+};
+
+/** Above this many image bytes `figure` warns: the page carries them all. */
+export const FIGURE_WARN_BYTES = 1024 * 1024;
+
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
+}
+
+/**
+ * A self-contained `<figure>`: the image as a data URI, inside a link when
+ * `href` is given, with an escaped caption. `href` must be a fragment or a
+ * relative link (`#cp-page:<key>` links plan pages); `width` is CSS pixels.
+ */
+export function figureHtml({ image, type, href, caption, alt, width }) {
+  if (
+    href !== undefined &&
+    (!href || !isSafeUrl(href) || /^data:/i.test(href.trim()))
+  )
+    throw new KitError(
+      `--href ${href}: use a fragment such as '#cp-page:<key>' or a relative link`,
+    );
+  let style = "max-width:100%;height:auto;display:block";
+  if (width !== undefined) {
+    const px = Number(width);
+    if (!(Number.isFinite(px) && px > 0))
+      throw new KitError(
+        `--width ${width}: use a positive number of CSS pixels`,
+      );
+    style = `width:${px}px;${style}`;
+  }
+  const src = `data:${type};base64,${image.toString("base64")}`;
+  let img = `<img src="${src}" alt="${escapeHtml(alt ?? caption ?? "")}" style="${style}">`;
+  if (href !== undefined) img = `<a href="${escapeHtml(href)}">${img}</a>`;
+  const figcaption =
+    caption === undefined
+      ? ""
+      : `\n  <figcaption>${escapeHtml(caption)}</figcaption>`;
+  return `<figure style="margin:0">\n  ${img}${figcaption}\n</figure>\n`;
+}
+
+/** `figure --img <file> --out <file>`: writes the fragment; no kit needed. */
+function figureCommand(options, io) {
+  if (!options.img)
+    throw new KitError("figure needs --img <file.png|jpg|webp>");
+  if (!options.out) throw new KitError("figure needs --out <file>");
+  const file = resolve(options.img);
+  const type = FIGURE_TYPES[extname(file).toLowerCase()];
+  if (!type)
+    throw new KitError(`--img ${options.img}: use a .png, .jpg or .webp file`);
+  if (!existsSync(file))
+    throw new KitError(`--img ${options.img}: no such file`);
+  const image = readFileSync(file);
+  const html = figureHtml({
+    image,
+    type,
+    href: options.href,
+    caption: options.caption,
+    alt: options.alt,
+    width: options.width,
+  });
+  if (image.length > FIGURE_WARN_BYTES)
+    io.err(
+      `kit: warning: ${options.img} is ${formatBytes(image.length)}; the page carries it all (shrink it below 1 MB)`,
+    );
+  const out = resolve(options.out);
+  writeFileSync(out, html);
+  io.out(`${out}  ${formatBytes(Buffer.byteLength(html))}`);
+}
+
 // ── CLI ─────────────────────────────────────────────────────────────────────
 
 const USAGE = `usage: kit.mjs [--kit <dir>] <command>
@@ -2201,7 +2296,10 @@ const USAGE = `usage: kit.mjs [--kit <dir>] <command>
   show <id> [--full]           path, size and an outline (--full: the markup)
   compose --frame <id> [--slot <name>=<file>]… [--theme light|dark] [--show-new] [--css pruned|full] --out <file>
                                --css full keeps every rule of the kit's CSS; the default
-                               keeps only rules the page's classes and ids can use`;
+                               keeps only rules the page's classes and ids can use
+  figure --img <file.png|jpg|webp> [--href '#cp-page:<key>'] [--caption <text>] [--alt <text>] [--width <px>] --out <file>
+                               a self-contained <figure>: the image as a data URI, linked when
+                               --href is given, the caption escaped (no kit needed)`;
 
 function parseArgs(argv) {
   const options = { slots: [], positional: [] };
@@ -2219,6 +2317,11 @@ function parseArgs(argv) {
     else if (arg === "--theme") options.theme = value();
     else if (arg === "--out") options.out = value();
     else if (arg === "--css") options.css = value();
+    else if (arg === "--img") options.img = value();
+    else if (arg === "--href") options.href = value();
+    else if (arg === "--caption") options.caption = value();
+    else if (arg === "--alt") options.alt = value();
+    else if (arg === "--width") options.width = value();
     else if (arg === "--full") options.full = true;
     else if (arg === "--json") options.json = true;
     else if (arg === "--show-new") options.showNew = true;
@@ -2242,6 +2345,11 @@ export function run(
     if (options.help || !command) {
       io.out(USAGE);
       return command || options.help ? 0 : 2;
+    }
+    if (command === "figure") {
+      if (rest.length) throw new KitError(`figure takes no ${rest[0]}`);
+      figureCommand(options, io);
+      return 0;
     }
     const dir = resolve(options.kit ?? env.DESIGN_KIT_DIR ?? defaultDir);
     const kit = loadKit(dir);
