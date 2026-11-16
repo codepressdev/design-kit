@@ -19,12 +19,11 @@ import {
   renameSync,
   rmSync,
 } from "node:fs";
-import http from "node:http";
-import https from "node:https";
 import { dirname, join, resolve } from "node:path";
 import { pipeline } from "node:stream/promises";
 
 import { StorageError, checkSha, isKit, kitCacheDir } from "./common.mjs";
+import { openRequest, reachMessage } from "./proxy.mjs";
 import { unzipTo } from "./zip.mjs";
 
 /** How long the download may stall before it counts as failed. */
@@ -46,8 +45,11 @@ export function redactUrl(url) {
   return String(url).replace(/\?.*$/s, "?…");
 }
 
-/** Streams `url` into `file`. A non-2xx answer or a broken stream throws. */
-function download(url, file) {
+/**
+ * Streams `url` into `file`, through the proxy `env` names (proxy.mjs). A
+ * non-2xx answer or a broken stream throws.
+ */
+function download(url, file, env) {
   let parsed;
   try {
     parsed = new URL(url);
@@ -59,9 +61,8 @@ function download(url, file) {
       "invalid_url",
       "--url must be an https: download URL",
     );
-  const client = parsed.protocol === "http:" ? http : https;
   return new Promise((resolvePromise, reject) => {
-    const req = client.get(parsed, { timeout: DOWNLOAD_TIMEOUT_MS }, (res) => {
+    const onResponse = (res) => {
       const status = res.statusCode ?? 0;
       if (status < 200 || status >= 300) {
         res.resume();
@@ -88,16 +89,30 @@ function download(url, file) {
           ),
         ),
       );
-    });
+    };
+    let opened;
+    try {
+      opened = openRequest(
+        parsed,
+        { method: "GET", timeout: DOWNLOAD_TIMEOUT_MS },
+        onResponse,
+        env,
+      );
+    } catch (error) {
+      reject(error);
+      return;
+    }
+    const { req, proxied } = opened;
     req.on("timeout", () => req.destroy(new Error("no answer in time")));
     req.on("error", (error) =>
       reject(
         new StorageError(
           "kit_storage_unavailable",
-          `could not reach ${parsed.host} (${error.code ?? error.message})`,
+          reachMessage(parsed.host, error, proxied),
         ),
       ),
     );
+    req.end();
   });
 }
 
@@ -145,7 +160,7 @@ export async function fetchFromUrl({
   try {
     const zipFile = join(scratch, "kit.zip");
     const unpacked = join(scratch, "kit");
-    await download(url, zipFile);
+    await download(url, zipFile, env);
     try {
       unzipTo(readFileSync(zipFile), unpacked);
     } catch (error) {

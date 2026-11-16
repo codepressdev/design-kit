@@ -17,8 +17,6 @@
  * `kit_storage_unavailable`.
  */
 import { readFileSync } from "node:fs";
-import http from "node:http";
-import https from "node:https";
 import { join, resolve } from "node:path";
 
 import { ConfigError } from "../config.mjs";
@@ -29,6 +27,7 @@ import {
   isKit,
   kitCacheDir,
 } from "./common.mjs";
+import { openRequest, reachMessage } from "./proxy.mjs";
 import { zipDirectory } from "./zip.mjs";
 
 export const DEFAULT_URL = "https://codepress.dev";
@@ -53,37 +52,48 @@ export function apiBase(storage = {}) {
 /**
  * One HTTP request: `{status, headers, body}` (body a Buffer). Headers are
  * sent exactly as given, so a presigned PUT carries its signed
- * Content-Length. A failure to connect, or no answer within the timeout, is
+ * Content-Length. It goes through the proxy `env` names (proxy.mjs). A
+ * failure to connect, or no answer within the timeout, is
  * `kit_storage_unavailable`.
  */
-export function request(url, { method = "GET", headers = {}, body } = {}) {
+export function request(
+  url,
+  { method = "GET", headers = {}, body, env = process.env } = {},
+) {
   return new Promise((resolvePromise, reject) => {
     let parsed;
     try {
       parsed = new URL(url);
     } catch {
-      reject(new StorageError(UNAVAILABLE, `not a URL: ${url}`));
+      reject(new StorageError(UNAVAILABLE, "not a URL"));
       return;
     }
-    const client = parsed.protocol === "http:" ? http : https;
-    const req = client.request(
-      parsed,
-      { method, headers, timeout: REQUEST_TIMEOUT_MS },
-      (res) => {
-        const chunks = [];
-        res.on("data", (chunk) => chunks.push(chunk));
-        res.on("end", () =>
-          resolvePromise({
-            status: res.statusCode ?? 0,
-            headers: res.headers,
-            body: Buffer.concat(chunks),
-          }),
-        );
-        res.on("error", (error) =>
-          reject(new StorageError(UNAVAILABLE, error.message)),
-        );
-      },
-    );
+    let opened;
+    try {
+      opened = openRequest(
+        parsed,
+        { method, headers, timeout: REQUEST_TIMEOUT_MS },
+        (res) => {
+          const chunks = [];
+          res.on("data", (chunk) => chunks.push(chunk));
+          res.on("end", () =>
+            resolvePromise({
+              status: res.statusCode ?? 0,
+              headers: res.headers,
+              body: Buffer.concat(chunks),
+            }),
+          );
+          res.on("error", (error) =>
+            reject(new StorageError(UNAVAILABLE, error.message)),
+          );
+        },
+        env,
+      );
+    } catch (error) {
+      reject(error);
+      return;
+    }
+    const { req, proxied } = opened;
     req.on("timeout", () =>
       req.destroy(new Error(`no answer from ${parsed.host} in time`)),
     );
@@ -91,7 +101,7 @@ export function request(url, { method = "GET", headers = {}, body } = {}) {
       reject(
         new StorageError(
           UNAVAILABLE,
-          `could not reach ${parsed.host} (${error.code ?? error.message})`,
+          reachMessage(parsed.host, error, proxied),
         ),
       ),
     );
@@ -225,6 +235,7 @@ export async function oidcToken(audience, env = process.env) {
     `${url}${separator}audience=${encodeURIComponent(audience)}`,
     {
       headers: { Authorization: `bearer ${token}`, Accept: "application/json" },
+      env,
     },
     "Requesting the GitHub OIDC token",
   );
@@ -276,6 +287,7 @@ export function codepressStorage(
           Authorization: `Bearer ${token}`,
           Accept: "application/json",
         },
+        env,
       },
     );
     if (response.status < 200 || response.status >= 300) {
@@ -312,7 +324,7 @@ export function codepressStorage(
       const path = resolve(out ?? kitCacheDir(kit.commit_sha, env));
       const result = { path, sha: kit.commit_sha, branch: kit.branch };
       if (isKit(path)) return { ...result, cached: true };
-      const response = await request(kit.download_url);
+      const response = await request(kit.download_url, { env });
       if (response.status < 200 || response.status >= 300)
         throw refusal(response, "Downloading the kit");
       installKit(response.body, path);
@@ -333,6 +345,7 @@ export function codepressStorage(
           method: "POST",
           headers: auth,
           body: JSON.stringify({ size_bytes: zip.length, manifest }),
+          env,
         },
         "Starting the upload",
       );
@@ -341,6 +354,7 @@ export function codepressStorage(
         method: target.method ?? "PUT",
         headers: { ...target.headers },
         body: zip,
+        env,
       });
       if (put.status < 200 || put.status >= 300)
         throw new StorageError(
@@ -349,7 +363,7 @@ export function codepressStorage(
         );
       const done = await json(
         `${api}/design-kits/uploads/${encodeURIComponent(started.upload_id)}/complete`,
-        { method: "POST", headers: auth, body: "{}" },
+        { method: "POST", headers: auth, body: "{}", env },
         "Completing the upload",
       );
       return {
