@@ -10,6 +10,8 @@
  *                        [--show-new] [--css pruned|full] --out <file>
  *   node kit.mjs figure --img <file> [--href <#cp-page:key>] [--caption <text>]
  *                       [--alt <text>] [--width <px>] --out <file>
+ *   node kit.mjs figure --page <file.html> [--href <#cp-page:key>] [--caption <text>]
+ *                       [--alt <text>] [--width <px>] [--fit <px>] [--height <px>] --out <file>
  *
  * `--kit <dir>` (or DESIGN_KIT_DIR) points at a kit; the default is the
  * folder this file sits in. Format: the @codepress/design-kit README.
@@ -2226,12 +2228,8 @@ function escapeHtml(value) {
     .replaceAll('"', "&quot;");
 }
 
-/**
- * A self-contained `<figure>`: the image as a data URI, inside a link when
- * `href` is given, with an escaped caption. `href` must be a fragment or a
- * relative link (`#cp-page:<key>` links plan pages); `width` is CSS pixels.
- */
-export function figureHtml({ image, type, href, caption, alt, width }) {
+/** A figure's link: a fragment or relative link, never a scheme. */
+function checkFigureHref(href) {
   if (
     href !== undefined &&
     (!href || !isSafeUrl(href) || /^data:/i.test(href.trim()))
@@ -2239,6 +2237,15 @@ export function figureHtml({ image, type, href, caption, alt, width }) {
     throw new KitError(
       `--href ${href}: use a fragment such as '#cp-page:<key>' or a relative link`,
     );
+}
+
+/**
+ * A self-contained `<figure>`: the image as a data URI, inside a link when
+ * `href` is given, with an escaped caption. `href` must be a fragment or a
+ * relative link (`#cp-page:<key>` links plan pages); `width` is CSS pixels.
+ */
+export function figureHtml({ image, type, href, caption, alt, width }) {
+  checkFigureHref(href);
   let style = "max-width:100%;height:auto;display:block";
   if (width !== undefined) {
     const px = Number(width);
@@ -2258,33 +2265,616 @@ export function figureHtml({ image, type, href, caption, alt, width }) {
   return `<figure style="margin:0">\n  ${img}${figcaption}\n</figure>\n`;
 }
 
-/** `figure --img <file> --out <file>`: writes the fragment; no kit needed. */
-function figureCommand(options, io) {
-  if (!options.img)
-    throw new KitError("figure needs --img <file.png|jpg|webp>");
-  if (!options.out) throw new KitError("figure needs --out <file>");
-  const file = resolve(options.img);
-  const type = FIGURE_TYPES[extname(file).toLowerCase()];
-  if (!type)
-    throw new KitError(`--img ${options.img}: use a .png, .jpg or .webp file`);
-  if (!existsSync(file))
-    throw new KitError(`--img ${options.img}: no such file`);
-  const image = readFileSync(file);
-  const html = figureHtml({
-    image,
-    type,
-    href: options.href,
-    caption: options.caption,
-    alt: options.alt,
-    width: options.width,
+// ── figure --page ───────────────────────────────────────────────────────────
+// A composed page shown in a plan page as itself, scaled: its markup and CSS
+// in a declarative shadow root, not an iframe (plan pages allow no nested
+// frames). Inside a shadow root `:root`, `html` and `body` match nothing and
+// the plan page's inherited styles flow in, so the page's <html> and <body>
+// become elements of their own and its selectors follow them.
+
+/** Design width when neither --width nor the page's data-kit-id says. */
+export const FIGURE_PAGE_WIDTH = 1280;
+/** Displayed width by default. */
+export const FIGURE_PAGE_FIT = 640;
+/** Default crop: height = width × this (16:10). */
+const FIGURE_PAGE_RATIO = 0.625;
+/** Elements dropped with their content besides what sanitizeMarkup drops. */
+const PAGE_DROPPED = new Set([
+  "iframe",
+  "frame",
+  "frameset",
+  "object",
+  "embed",
+]);
+const PAGE_ATTR = /^(?:class|style|lang|dir|id|data-[a-z0-9-]+)$/;
+const VIEWPORT_UNIT =
+  /^(-?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?)(s|l|d)?(vh|vw|vmin|vmax|vb|vi)(?![A-Za-z0-9_-])/i;
+
+function positivePx(name, value, fallback) {
+  if (value === undefined) return fallback;
+  const px = Number(value);
+  if (!(Number.isFinite(px) && px > 0))
+    throw new KitError(`${name} ${value}: use a positive number of CSS pixels`);
+  return px;
+}
+
+function px(value) {
+  return `${Number(value.toFixed(4))}px`;
+}
+
+/** Viewport units as pixels of the design box; strings and url()s untouched. */
+export function viewportToPixels(css, width, height) {
+  let out = "";
+  let i = 0;
+  while (i < css.length) {
+    if (css[i] === "\\" || css[i] === "[") {
+      // An escape continues an identifier (`.h-\[100dvh\]` is a class
+      // name), and an attribute selector's value is no length.
+      const end =
+        css[i] === "[" ? closeBracket(css, i) : readCssIdent(css, i)[1];
+      out += css.slice(i, Math.max(end, i + 1));
+      i = Math.max(end, i + 1);
+      continue;
+    }
+    const skip = cssSkip(css, i);
+    if (skip >= 0) {
+      out += css.slice(i, skip);
+      i = skip;
+      continue;
+    }
+    const ch = css[i];
+    const prev = i > 0 ? css[i - 1] : "";
+    if (/[-.0-9]/.test(ch) && !CSS_IDENT_CHAR.test(prev) && prev !== ".") {
+      const match = VIEWPORT_UNIT.exec(css.slice(i, i + 40));
+      if (match) {
+        const unit = match[3].toLowerCase();
+        const base =
+          unit === "vh" || unit === "vb"
+            ? height
+            : unit === "vw" || unit === "vi"
+              ? width
+              : unit === "vmin"
+                ? Math.min(width, height)
+                : Math.max(width, height);
+        out += px((Number(match[1]) * base) / 100);
+        i += match[0].length;
+        continue;
+      }
+    }
+    if (CSS_IDENT_CHAR.test(ch)) {
+      // A whole identifier, escapes included (`--x-2vh`, `h-screen`,
+      // `h-\[100vh\]`), so no number starts inside.
+      const j = readCssIdent(css, i)[1];
+      out += css.slice(i, j);
+      i = j;
+      continue;
+    }
+    out += ch;
+    i += 1;
+  }
+  return out;
+}
+
+/**
+ * A selector with `:root`, `html` and `body` pointed at the elements that
+ * stand in for them, at the same specificity: `.cp-page-root` is a class as
+ * `:root` is a pseudo-class, and the two custom elements are type selectors.
+ */
+export function pageSelector(selector) {
+  let out = "";
+  let i = 0;
+  while (i < selector.length) {
+    const ch = selector[i];
+    if (ch === "[") {
+      const end = closeBracket(selector, i);
+      out += selector.slice(i, end);
+      i = end;
+      continue;
+    }
+    const skip = cssSkip(selector, i);
+    if (skip >= 0) {
+      out += selector.slice(i, skip);
+      i = skip;
+      continue;
+    }
+    if (ch === ":" || ch === "." || ch === "#") {
+      // A pseudo, class or id name: never a type selector.
+      let j = i + 1;
+      if (ch === ":" && selector[j] === ":") j += 1;
+      const [name, next] = readCssIdent(selector, j);
+      if (ch === ":" && j === i + 1 && name.toLowerCase() === "root")
+        out += ".cp-page-root";
+      else out += selector.slice(i, next);
+      i = Math.max(next, i + 1);
+      continue;
+    }
+    if (CSS_IDENT_CHAR.test(ch)) {
+      const [name, next] = readCssIdent(selector, i);
+      const lower = name.toLowerCase();
+      out +=
+        lower === "html"
+          ? "cp-page-html"
+          : lower === "body"
+            ? "cp-page-body"
+            : selector.slice(i, next);
+      i = Math.max(next, i + 1);
+      continue;
+    }
+    out += ch;
+    i += 1;
+  }
+  return out;
+}
+
+function mediaLength(text) {
+  const match = /^(-?(?:\d+\.?\d*|\.\d+))(px|rem|em)?$/i.exec(text.trim());
+  if (!match) return null;
+  if (!match[2] && Number(match[1]) !== 0) return null;
+  return (
+    Number(match[1]) * (match[2] && match[2].toLowerCase() !== "px" ? 16 : 1)
+  );
+}
+
+const COMPARE = {
+  "<": (a, b) => a < b,
+  "<=": (a, b) => a <= b,
+  ">": (a, b) => a > b,
+  ">=": (a, b) => a >= b,
+  "=": (a, b) => a === b,
+};
+const FLIP = { "<": ">", "<=": ">=", ">": "<", ">=": "<=", "=": "=" };
+
+/** One `( … )` media feature against the box, or null when not a size. */
+function mediaFeature(feature, width, height) {
+  const size = { width, height };
+  const text = feature.trim().toLowerCase();
+  const colon = /^(min-|max-)?(width|height)\s*:\s*(.+)$/.exec(text);
+  if (colon) {
+    const value = mediaLength(colon[3]);
+    if (value === null) return null;
+    const actual = size[colon[2]];
+    return colon[1] === "min-"
+      ? actual >= value
+      : colon[1] === "max-"
+        ? actual <= value
+        : actual === value;
+  }
+  const orientation = /^orientation\s*:\s*(portrait|landscape)$/.exec(text);
+  if (orientation) return (orientation[1] === "portrait") === height >= width;
+  // Range syntax: `width >= 48rem`, `40rem <= width < 64rem`.
+  const parts = text.split(/\s*(<=|>=|<|>|=)\s*/);
+  if (parts.length !== 3 && parts.length !== 5) return null;
+  const at = parts.findIndex((p) => p === "width" || p === "height");
+  if (at < 0 || at % 2) return null;
+  const actual = size[parts[at]];
+  const checks = [];
+  if (at > 0) checks.push([parts[at - 2], FLIP[parts[at - 1]]]);
+  if (at + 2 < parts.length) checks.push([parts[at + 2], parts[at + 1]]);
+  let result = true;
+  for (const [valueText, op] of checks) {
+    const value = mediaLength(valueText);
+    if (value === null || !COMPARE[op]) return null;
+    result = result && COMPARE[op](actual, value);
+  }
+  return result;
+}
+
+/**
+ * Whether an `@media` prelude holds at the design box: true or false when
+ * every query is a screen/all/print type and size or orientation features,
+ * else null (the browser decides, as it would anyway).
+ */
+export function mediaMatches(prelude, width, height) {
+  const queries = selectorParts(prelude.replace(/^@media\b/i, ""));
+  let any = false;
+  for (const raw of queries) {
+    let query = raw
+      .trim()
+      .toLowerCase()
+      .replace(/^only\s+/, "");
+    const negated = /^not\s/.test(query);
+    if (negated) query = query.replace(/^not\s+/, "");
+    if (!query) return null;
+    let holds = true;
+    const type = /^(all|screen|print)\b\s*/.exec(query);
+    if (type) {
+      if (type[1] === "print") holds = false;
+      query = query.slice(type[0].length);
+      if (query && !/^and\b/.test(query)) return null;
+      query = query.replace(/^and\s*/, "");
+    }
+    while (query) {
+      const feature = /^\(([^()]*)\)\s*/.exec(query);
+      if (!feature) return null;
+      const value = mediaFeature(feature[1], width, height);
+      if (value === null) return null;
+      holds = holds && value;
+      query = query.slice(feature[0].length);
+      if (query) {
+        if (!/^and\b/.test(query)) return null;
+        query = query.replace(/^and\s*/, "");
+        if (!query) return null;
+      }
+    }
+    any = any || (negated ? !holds : holds);
+  }
+  return any;
+}
+
+/** Pseudo-classes an inert figure never enters. */
+const USER_ACTION = new Set([
+  "hover",
+  "active",
+  "focus",
+  "focus-visible",
+  "focus-within",
+]);
+/** Functional pseudo-classes whose argument must match for the whole to. */
+const REQUIRED_ARGUMENT = new Set(["is", "where", "has", "matches", "any"]);
+
+/**
+ * Whether one selector can match in a figure, whose markup no script changes
+ * and no one hovers, focuses or presses: every class and id it needs is in
+ * `names` (inside `:is()`, `:where()` and `:has()` too, where one of the
+ * argument's selectors must be able to match), and it needs no user-action
+ * state outside `:not()`.
+ */
+export function figureSelectorCanMatch(selector, names) {
+  let i = 0;
+  while (i < selector.length) {
+    const ch = selector[i];
+    if (ch === "[") {
+      i = closeBracket(selector, i);
+      continue;
+    }
+    const skip = cssSkip(selector, i);
+    if (skip >= 0) {
+      i = skip;
+      continue;
+    }
+    if (ch === "." || ch === "#") {
+      const [name, next] = readCssIdent(selector, i + 1);
+      if (name && !names.has(name)) return false;
+      i = Math.max(next, i + 1);
+      continue;
+    }
+    if (ch === ":") {
+      const element = selector[i + 1] === ":";
+      const [name, next] = readCssIdent(selector, i + (element ? 2 : 1));
+      const lower = name.toLowerCase();
+      if (!element && USER_ACTION.has(lower)) return false;
+      if (selector[next] === "(") {
+        const close = closeBracket(selector, next);
+        if (
+          !element &&
+          REQUIRED_ARGUMENT.has(lower) &&
+          !selectorParts(selector.slice(next + 1, close - 1)).some((part) =>
+            figureSelectorCanMatch(part, names),
+          )
+        )
+          return false;
+        i = close;
+        continue;
+      }
+      i = Math.max(next, i + 1);
+      continue;
+    }
+    if (CSS_IDENT_CHAR.test(ch)) {
+      i = readCssIdent(selector, i)[1];
+      continue;
+    }
+    i += 1;
+  }
+  return true;
+}
+
+/** The page's CSS for inside the shadow root, plus what must sit outside. */
+function shadowCss(nodes, box, names, fonts, properties) {
+  const out = [];
+  for (const node of nodes) {
+    if (node.type === "rule") {
+      const selector = pageSelector(node.prelude);
+      if (
+        selectorParts(selector).some((part) =>
+          figureSelectorCanMatch(part, names),
+        )
+      )
+        out.push(selector + node.text.slice(node.prelude.length));
+    } else if (node.type === "wrapper") {
+      const inner = shadowCss(node.children, box, names, fonts, properties);
+      const media = /^@media\b/i.test(node.head)
+        ? mediaMatches(node.head.slice(0, -1), box.width, box.height)
+        : null;
+      if (media === true) out.push(...inner);
+      else if (media === null && (inner.length || node.named))
+        out.push(`${node.head}\n${inner.join("\n")}\n}`);
+    } else if (/^@font-face\b/i.test(node.text)) {
+      fonts.push(node.text);
+    } else {
+      const property = /^@property\s+(--[^\s{]+)\s*\{([^}]*)\}/i.exec(
+        node.text,
+      );
+      if (property) {
+        const initial = /initial-value\s*:\s*([^;}]*)/i.exec(property[2]);
+        if (initial)
+          properties.push({
+            name: property[1],
+            value: initial[1].trim(),
+            inherits: /inherits\s*:\s*true/i.test(property[2]),
+          });
+      }
+      out.push(node.text);
+    }
+  }
+  return out;
+}
+
+/** A page's <html> or <body> attributes as the stand-in element carries them. */
+function pageAttributes(attrs, extraClass, box) {
+  const kept = [];
+  let classes = extraClass;
+  for (const [name, raw] of Object.entries(attrs ?? {})) {
+    if (!PAGE_ATTR.test(name)) continue;
+    let value = decodeEntities(raw);
+    if (name === "class") {
+      classes = [extraClass, value].filter(Boolean).join(" ");
+      continue;
+    }
+    if (name === "style")
+      value = viewportToPixels(sanitizeCss(value), box.width, box.height);
+    kept.push(` ${name}="${escapeAttr(value)}"`);
+  }
+  return `${classes ? ` class="${escapeAttr(classes)}"` : ""}${kept.join("")}`;
+}
+
+/** Markup with the given elements removed, content and all. */
+function withoutElements(html, names) {
+  const ranges = elements(html)
+    .filter((element) => names.has(element.name))
+    .sort((a, b) => a.start - b.start);
+  let out = "";
+  let at = 0;
+  for (const range of ranges) {
+    if (range.start < at) continue;
+    out += html.slice(at, range.start);
+    at = range.end;
+  }
+  return out + html.slice(at);
+}
+
+/** Every inline style attribute's viewport units as design-box pixels. */
+function inlineStylesToPixels(html, box) {
+  return html.replace(
+    /(\sstyle\s*=\s*)(?:"([^"]*)"|'([^']*)')/gi,
+    (whole, lead, dq, sq) => {
+      const value = viewportToPixels(dq ?? sq, box.width, box.height);
+      return dq !== undefined ? `${lead}"${value}"` : `${lead}'${value}'`;
+    },
+  );
+}
+
+/**
+ * A self-contained `<figure>` that renders `page` (a composed page or any
+ * self-contained HTML page) at `width` × `height` design pixels, scaled to
+ * `fit` CSS pixels wide and clipped, inside a declarative shadow root.
+ * Returns the fragment and how many <script> elements were dropped.
+ */
+export function pageFigureHtml(
+  page,
+  { href, caption, alt, width, fit, height } = {},
+) {
+  checkFigureHref(href);
+  const tokens = tokenize(page);
+  const open = (name) =>
+    tokens.find((t) => t.type === "open" && t.name === name);
+  const htmlTag = open("html");
+  const bodyTag = open("body");
+  const recorded = /@(\d+)$/.exec(
+    decodeEntities(htmlTag?.attrs["data-kit-id"] ?? ""),
+  );
+  const boxWidth = positivePx(
+    "--width",
+    width,
+    recorded ? Number(recorded[1]) : FIGURE_PAGE_WIDTH,
+  );
+  const shown = positivePx("--fit", fit, FIGURE_PAGE_FIT);
+  const boxHeight = positivePx(
+    "--height",
+    height,
+    boxWidth * FIGURE_PAGE_RATIO,
+  );
+  const box = { width: boxWidth, height: boxHeight };
+  const scale = shown / boxWidth;
+
+  const scripts = tokens.filter(
+    (t) => t.type === "open" && t.name === "script",
+  ).length;
+  const styles = [];
+  tokens.forEach((token, at) => {
+    const text = tokens[at + 1];
+    if (
+      token.type === "open" &&
+      token.name === "style" &&
+      !token.selfClosing &&
+      text?.type === "text"
+    )
+      styles.push(page.slice(text.start, text.end));
   });
-  if (image.length > FIGURE_WARN_BYTES)
+
+  // The body's content: between <body> and its close, else after </head>.
+  const closeOf = (name) =>
+    tokens.findLast((t) => t.type === "close" && t.name === name);
+  const headClose = closeOf("head");
+  const start = bodyTag?.end ?? headClose?.end ?? htmlTag?.end ?? 0;
+  const stop = closeOf("body")?.start ?? closeOf("html")?.start ?? page.length;
+  let body = page.slice(start, Math.max(start, stop));
+  if (!bodyTag) body = body.replace(/<!doctype[^>]*>/gi, "");
+  body = sanitizeMarkup(
+    withoutElements(body, new Set(["style", "head", ...PAGE_DROPPED])),
+  );
+  body = inlineStylesToPixels(body, box);
+
+  const htmlOpen = `<cp-page-html${pageAttributes(htmlTag?.attrs, "cp-page-root", box)}>`;
+  const bodyOpen = `<cp-page-body${pageAttributes(bodyTag?.attrs, "", box)}>`;
+  // Every class and id the figure has: with no scripts, nothing adds one.
+  const names = new Set();
+  for (const element of elements(`${htmlOpen}${bodyOpen}${body}`)) {
+    const { class: classes, id } = element.attrs;
+    for (const name of decodeEntities(classes ?? "").split(/[\t\n\f\r ]+/))
+      if (name) names.add(name);
+    if (id) names.add(decodeEntities(id));
+  }
+  const fonts = [];
+  const properties = [];
+  const sheet = sanitizeCss(styles.join("\n"));
+  const css = viewportToPixels(
+    shadowCss(
+      parseCssList(sheet, 0, sheet.length),
+      box,
+      names,
+      fonts,
+      properties,
+    ).join("\n"),
+    box.width,
+    box.height,
+  );
+  const declarations = (list) =>
+    list.map((p) => `${p.name}:${p.value}`).join(";");
+  const local = properties.filter((p) => !p.inherits);
+  const inherited = properties.filter((p) => p.inherits);
+  // The lowest cascade layer (declared first): the stand-ins' defaults, the
+  // inherited properties reset, and @property initial values, which Chromium
+  // ignores inside a shadow root.
+  const base = [
+    "cp-page-html{all:initial;display:block;min-height:100%}",
+    "cp-page-body{display:block;margin:8px}",
+    inherited.length ? `cp-page-html{${declarations(inherited)}}` : "",
+    local.length ? `*,::before,::after,::backdrop{${declarations(local)}}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  const label = alt ?? caption ?? "";
+  const shownHeight = px(boxHeight * scale);
+  // inline-block: an atomic inline, so the link's (or any host ancestor's)
+  // text-decoration, which propagates rather than inherits, stops here.
+  const outer = [
+    "display:inline-block",
+    "vertical-align:top",
+    "position:relative",
+    "overflow:hidden",
+    `width:${px(shown)}`,
+    "max-width:100%",
+    `height:${shownHeight}`,
+    "margin:0",
+    "padding:0",
+    "border:0",
+  ].join(";");
+  const inner = [
+    `width:${px(boxWidth)}`,
+    `height:${px(boxHeight)}`,
+    "overflow:hidden",
+    `transform:scale(${Number(scale.toFixed(6))})`,
+    "transform-origin:0 0",
+    "pointer-events:none",
+  ].join(";");
+  let view = `<div data-kit-figure-page role="img" aria-label="${escapeHtml(label)}" style="${outer}">
+<template shadowrootmode="open">
+<style>
+@layer cp-page-base{
+${base}
+}
+${css}
+</style>
+<div class="cp-page-box" inert style="${inner}">
+${htmlOpen}
+${bodyOpen}
+${body.trim()}
+</cp-page-body>
+</cp-page-html>
+</div>
+</template>
+</div>`;
+  if (href !== undefined)
+    view = `<a href="${escapeHtml(href)}" style="display:block;width:fit-content;max-width:100%;text-decoration:none">${view}</a>`;
+  const fontCss = fonts.length
+    ? `\n  <style>\n${fonts.join("\n")}\n</style>`
+    : "";
+  const figcaption =
+    caption === undefined
+      ? ""
+      : `\n  <figcaption>${escapeHtml(caption)}</figcaption>`;
+  return {
+    html: `<figure style="margin:0">${fontCss}\n  ${view}${figcaption}\n</figure>\n`,
+    scripts,
+  };
+}
+
+/**
+ * `figure --img <file> | --page <file> --out <file>`: writes the fragment;
+ * no kit needed.
+ */
+function figureCommand(options, io) {
+  if (options.img !== undefined && options.page !== undefined)
+    throw new KitError(
+      "figure takes --img or --page, not both: --img embeds a screenshot, --page renders a composed page",
+    );
+  if (options.img === undefined && options.page === undefined)
+    throw new KitError(
+      "figure needs --img <file.png|jpg|webp> or --page <file.html>",
+    );
+  if (!options.out) throw new KitError("figure needs --out <file>");
+  let html;
+  if (options.page !== undefined) {
+    const file = resolve(options.page);
+    if (!existsSync(file))
+      throw new KitError(`--page ${options.page}: no such file`);
+    const result = pageFigureHtml(readFileSync(file, "utf8"), {
+      href: options.href,
+      caption: options.caption,
+      alt: options.alt,
+      width: options.width,
+      fit: options.fit,
+      height: options.height,
+    });
+    html = result.html;
+    if (result.scripts)
+      io.err(
+        `kit: warning: dropped ${result.scripts} <script> element${result.scripts === 1 ? "" : "s"} from ${options.page}; the figure is static`,
+      );
+  } else {
+    if (options.fit !== undefined || options.height !== undefined)
+      throw new KitError("--fit and --height go with --page");
+    const file = resolve(options.img);
+    const type = FIGURE_TYPES[extname(file).toLowerCase()];
+    if (!type)
+      throw new KitError(
+        `--img ${options.img}: use a .png, .jpg or .webp file`,
+      );
+    if (!existsSync(file))
+      throw new KitError(`--img ${options.img}: no such file`);
+    const image = readFileSync(file);
+    html = figureHtml({
+      image,
+      type,
+      href: options.href,
+      caption: options.caption,
+      alt: options.alt,
+      width: options.width,
+    });
+    if (image.length > FIGURE_WARN_BYTES)
+      io.err(
+        `kit: warning: ${options.img} is ${formatBytes(image.length)}; the page carries it all (shrink it below 1 MB)`,
+      );
+  }
+  const bytes = Buffer.byteLength(html);
+  if (options.page !== undefined && bytes > FIGURE_WARN_BYTES)
     io.err(
-      `kit: warning: ${options.img} is ${formatBytes(image.length)}; the page carries it all (shrink it below 1 MB)`,
+      `kit: warning: the figure is ${formatBytes(bytes)}; the page carries it all (compose with --css pruned, or crop less, to shrink it below 1 MB)`,
     );
   const out = resolve(options.out);
   writeFileSync(out, html);
-  io.out(`${out}  ${formatBytes(Buffer.byteLength(html))}`);
+  io.out(`${out}  ${formatBytes(bytes)}`);
 }
 
 // ── CLI ─────────────────────────────────────────────────────────────────────
@@ -2299,7 +2889,11 @@ const USAGE = `usage: kit.mjs [--kit <dir>] <command>
                                keeps only rules the page's classes and ids can use
   figure --img <file.png|jpg|webp> [--href '#cp-page:<key>'] [--caption <text>] [--alt <text>] [--width <px>] --out <file>
                                a self-contained <figure>: the image as a data URI, linked when
-                               --href is given, the caption escaped (no kit needed)`;
+                               --href is given, the caption escaped (no kit needed)
+  figure --page <file.html> [--href '#cp-page:<key>'] [--caption <text>] [--alt <text>] [--width <px>] [--fit <px>] [--height <px>] --out <file>
+                               a composed page's own markup and CSS in a shadow root, laid out at
+                               --width (default: the frame's width, else 1280) by --height (default
+                               width x 0.625) and scaled to --fit px wide (default 640); no scripts`;
 
 function parseArgs(argv) {
   const options = { slots: [], positional: [] };
@@ -2318,6 +2912,9 @@ function parseArgs(argv) {
     else if (arg === "--out") options.out = value();
     else if (arg === "--css") options.css = value();
     else if (arg === "--img") options.img = value();
+    else if (arg === "--page") options.page = value();
+    else if (arg === "--fit") options.fit = value();
+    else if (arg === "--height") options.height = value();
     else if (arg === "--href") options.href = value();
     else if (arg === "--caption") options.caption = value();
     else if (arg === "--alt") options.alt = value();

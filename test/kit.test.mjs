@@ -215,6 +215,8 @@ test("kit.mjs makes no network call in any command", async () => {
       "offline.html",
       `<div data-kit-new>New</div><kit-snippet id="story:primitives-dialog--open@1280"></kit-snippet>`,
     );
+    const composed = scratchFile("offline-page.html");
+    const pageFigure = scratchFile("offline-page-figure.html");
     for (const args of [
       ["info"],
       ["find", "dialog"],
@@ -227,7 +229,7 @@ test("kit.mjs makes no network call in any command", async () => {
         "--slot",
         `main=${slot}`,
         "--out",
-        scratchFile("offline-page.html"),
+        composed,
       ],
       [
         "compose",
@@ -247,9 +249,19 @@ test("kit.mjs makes no network call in any command", async () => {
         "--out",
         scratchFile("offline-figure.html"),
       ],
+      [
+        "figure",
+        "--page",
+        composed,
+        "--href",
+        "#cp-page:plan",
+        "--out",
+        pageFigure,
+      ],
     ]) {
       kit(args);
     }
+    assert.match(readFileSync(pageFigure, "utf8"), /shadowrootmode="open"/);
   } finally {
     for (const [target, key, value] of saved) target[key] = value;
     syncBuiltinESMExports();

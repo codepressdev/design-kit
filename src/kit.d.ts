@@ -158,3 +158,48 @@ export function figureHtml(options: {
   alt?: string;
   width?: string | number;
 }): string;
+
+/** `figure --page`'s default design width when the page records none. */
+export const FIGURE_PAGE_WIDTH: number;
+/** `figure --page`'s default displayed width. */
+export const FIGURE_PAGE_FIT: number;
+
+/**
+ * `kit figure --page`'s fragment: the page's markup and CSS in a declarative
+ * shadow root, laid out at `width` × `height` design pixels and scaled to
+ * `fit` CSS pixels wide. `scripts` counts the <script> elements dropped.
+ */
+export function pageFigureHtml(
+  page: string,
+  options?: {
+    href?: string;
+    caption?: string;
+    alt?: string;
+    width?: string | number;
+    fit?: string | number;
+    height?: string | number;
+  },
+): { html: string; scripts: number };
+
+/** A selector with `:root`, `html` and `body` pointed at the figure's stand-ins. */
+export function pageSelector(selector: string): string;
+
+/** Whether an `@media` prelude holds at width × height; null when undecidable. */
+export function mediaMatches(
+  prelude: string,
+  width: number,
+  height: number,
+): boolean | null;
+
+/** CSS with viewport units turned into pixels of a width × height box. */
+export function viewportToPixels(
+  css: string,
+  width: number,
+  height: number,
+): string;
+
+/** Whether a selector can match in a static, inert figure with these names. */
+export function figureSelectorCanMatch(
+  selector: string,
+  names: Set<string>,
+): boolean;

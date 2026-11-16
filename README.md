@@ -546,13 +546,31 @@ node kit.mjs compose --frame route:dashboard@1280 --slot main=new.html \
   [--theme light|dark] [--show-new] [--css pruned|full] --out page.html
 node kit.mjs figure --img shot.png [--href '#cp-page:<key>'] [--caption text] \
   [--alt text] [--width px] --out figure.html
+node kit.mjs figure --page page.html [--href '#cp-page:<key>'] [--caption text] \
+  [--alt text] [--width px] [--fit px] [--height px] --out figure.html
 ```
 
-`figure` needs no kit: it writes a self-contained `<figure>` fragment with
-the `.png`, `.jpg` or `.webp` image as a data URI, inside a link when `--href`
-is given (a fragment such as `#cp-page:<key>`, which links a plan page to a
-screen page, or a relative link), and the caption and alt text escaped. It
-warns on stderr when the image is over 1 MB.
+`figure` needs no kit: it writes a self-contained `<figure>` fragment, inside
+a link when `--href` is given (a fragment such as `#cp-page:<key>`, which
+links a plan page to a screen page, or a relative link), with the caption and
+alt text escaped. It warns on stderr when the fragment is over 1 MB.
+
+- `--img` embeds the `.png`, `.jpg` or `.webp` image as a data URI.
+- `--page` renders a page `compose` wrote (or any self-contained HTML page)
+  in one step, with no screenshot: its markup and CSS go into a declarative
+  shadow root (`<template shadowrootmode="open">`, no iframe), so neither
+  page's CSS reaches the other. `<html>`/`<body>` become `<cp-page-html
+class="cp-page-root">`/`<cp-page-body>` with their classes and `data-*`
+  (the theme), and `:root`, `html` and `body` selectors follow them.
+  `@font-face` is hoisted outside the shadow root, where fonts load. The
+  page is laid out at `--width` design pixels (default: the frame width
+  `compose` recorded, else 1280) by `--height` (default `width × 0.625`), with
+  `vh`/`vw` units and width/height `@media` queries resolved against that
+  box, and shown scaled to `--fit` pixels wide (default 640), clipped.
+  Rules a static, inert figure never uses (hover, focus and active states,
+  classes the markup lacks) are left out. Scripts, `<meta>`, `<link>`, frames
+  and remote URLs are dropped; dropped scripts are named in one stderr
+  warning.
 
 `info` prints one line, such as
 `480e11d built 2026-11-15T18:58:59.954Z · stories 12821 · routes 133 · failed 13`,
