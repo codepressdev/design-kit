@@ -1,5 +1,11 @@
 # @codepress/design-kit
 
+## 0.13.1
+
+### Patch Changes
+
+- 7cf6b99: `design-kit fetch --url` and the `codepress` store's requests now go through `HTTPS_PROXY`/`HTTP_PROXY` (lowercase names first) and honour `NO_PROXY`, so they work in a network sandbox that only lets traffic out through a proxy. https goes through a `CONNECT` tunnel with Basic proxy auth when the proxy URL has credentials. A proxy that refuses the tunnel fails with `kit_storage_unavailable: could not reach <host> through the proxy (<status>)`, never printing the proxy's credentials or the URL's query. With no proxy variables nothing changes.
+
 ## 0.13.0
 
 ### Minor Changes
