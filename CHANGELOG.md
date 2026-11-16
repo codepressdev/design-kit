@@ -1,5 +1,11 @@
 # @codepress/design-kit
 
+## 0.14.0
+
+### Minor Changes
+
+- d721926: New `kit.mjs figure --page <composed.html> [--href] [--caption] [--alt] [--width] [--fit] [--height] --out <file>` turns a composed page into a plan-page figure in one step, with no screenshot and no browser. The fragment holds the page's own markup and CSS in a declarative shadow root (no iframe), so neither page's CSS reaches the other: `<html>`/`<body>` become `<cp-page-html class="cp-page-root">`/`<cp-page-body>` carrying their classes and `data-*` (the theme), `:root`/`html`/`body` selectors follow them at the same specificity, `@font-face` is hoisted outside the shadow root, `@property` initial values are applied inside it, viewport units and width/height `@media` queries resolve against the design box, and rules a static, inert figure can never use (hover/focus/active states, classes the markup lacks) are dropped. The page is laid out at `--width` (default: the frame width `compose` recorded, else 1280) by `--height` (default `width × 0.625`) and scaled to `--fit` pixels wide (default 640). Scripts, `<meta>`, `<link>`, frames and remote URLs are removed, with one stderr warning when scripts were dropped. `--page` and `--img` are mutually exclusive; `--img` is unchanged. `pageFigureHtml`, `pageSelector`, `mediaMatches`, `viewportToPixels` and `figureSelectorCanMatch` are exported from `@codepress/design-kit/kit`.
+
 ## 0.13.1
 
 ### Patch Changes
