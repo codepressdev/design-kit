@@ -1,5 +1,13 @@
 # @codepress/design-kit
 
+## 0.15.0
+
+### Minor Changes
+
+- 148dfe0: `@codepress/blog`: posts can carry an optional `hero` (an https or site-relative image URL) and `heroAlt` in their metadata, published in `_schema.json`; a post's share image is now `ogImage`, else `hero`, else the site default. `readingTime(html)` counts the sanitized body at 230 words a minute (rounded up, at least 1), and the HTTP content source returns it on each post and, from the backend's `reading_minutes`, on list summaries. `@codepress/blog/react` adds three opt-in pieces: `PostHero` (the post's hero as an eager, high-priority image in a fixed 2:1 box, or a `GeneratedCover`), `GeneratedCover` (an inline SVG drawn from the post's slug, title and tags, animated by `blog.css` and still under `prefers-reduced-motion`), and `ReadingProgress` (a 3 px bar pinned under the site header). Sites that do not render them, including `createAppBlog` and `createPagesBlog`, render exactly the markup they did before.
+
+  `@codepress/design-kit`: a page in `pages.pages` may set its own `shellReady`, or `false` for a page drawn outside the app's frame, such as a public blog page.
+
 ## 0.14.0
 
 ### Minor Changes
