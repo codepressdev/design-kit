@@ -371,7 +371,9 @@ export returns (`async ({ browser, baseUrl, config }) => state`).
   before the capture starts and again before it writes. To move a page from
   one source to another, rebuild the kit without the old source's rows.
 - `widths`: the sizes every page is captured at (default 1280×800 and 390×844).
-- `shellReady`: a selector the app's frame shows before any page content.
+- `shellReady`: a selector the app's frame shows before any page content. A
+  page's own `shellReady` replaces it for that page; `false` skips the wait,
+  for a page drawn outside the frame (a public page such as a blog).
 - `layout`: `{selector, attribute, default?}` reads the layout the app chose,
   for apps that render a different frame at phone width; `layoutSlots[<that
 value>]` then replaces `slots`.

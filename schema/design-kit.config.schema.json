@@ -280,6 +280,10 @@
           "description": "The page's source module, shown by `kit show` and searched by `kit find`."
         },
         "slots": { "$ref": "#/$defs/slots" },
+        "shellReady": {
+          "anyOf": [{ "type": "string", "minLength": 1 }, { "const": false }],
+          "description": "This page's frame selector instead of `pages.shellReady`, or false for a page drawn outside the app's frame (a public page)."
+        },
         "widths": {
           "type": "array",
           "minItems": 1,

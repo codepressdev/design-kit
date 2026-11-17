@@ -20,6 +20,8 @@ export interface PageConfig {
   sourceFile?: string;
   slots: { main: string[]; [slot: string]: string[] };
   layoutSlots?: Record<string, { main: string[]; [slot: string]: string[] }>;
+  /** This page's frame selector instead of `pages.shellReady`; false waits for none. */
+  shellReady?: string | false;
 }
 
 /** A loaded, validated config with its paths resolved. */

@@ -310,11 +310,11 @@ async function capturePage(context, page, viewport, run) {
     await tab.goto(new URL(page.path, baseUrl).href, {
       waitUntil: "domcontentloaded",
     });
-    if (settings.shellReady) {
-      await tab
-        .locator(settings.shellReady)
-        .first()
-        .waitFor({ state: "visible" });
+    // A page may name its own frame, or none (`false`) when it is drawn
+    // outside the app's frame.
+    const shellReady = page.shellReady ?? settings.shellReady;
+    if (shellReady) {
+      await tab.locator(shellReady).first().waitFor({ state: "visible" });
     }
     // A page reached by a click or a key, not by its path alone (a settings
     // panel, a drawer), gets there here.
