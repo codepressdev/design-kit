@@ -1,5 +1,11 @@
 # @codepress/design-kit
 
+## 0.15.1
+
+### Patch Changes
+
+- 87759c8: `kit compose` no longer fails with `RangeError: Maximum call stack size exceeded` on a kit whose CSS has an escaped quote in a selector (Tailwind's `[stroke=\'#ccc\']`) megabytes before the next quote. The CSS sanitizer is now one linear scan that reads strings, comments and escapes as the browser does, so the escaped quote no longer opens a string, and a `url()` after an apostrophe in a comment or after a string cut off by a newline is checked too. `@import` is still removed, a `url()` outside the allowlist still becomes `none`, and a string naming a remote URL still becomes `""`.
+
 ## 0.15.0
 
 ### Minor Changes
