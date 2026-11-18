@@ -376,6 +376,57 @@ test("the sanitizer reads URLs as the browser does: entities, CSS escapes and ev
   assert.ok(css.includes(".keep3\\:hover{color:red}"), css);
 });
 
+test("sanitizeCss reads an escaped quote in a selector as part of the name, even megabytes from the next quote", () => {
+  // The q5 App kit's shape: a Tailwind class with `\'` in it, then over
+  // 8 MB of CSS before the next quote. The old regex took `\'` for the
+  // start of a string and overflowed the stack matching it.
+  const selector = `.a\\[stroke\\=\\'\\#ccc\\'\\]\\:stroke-border{stroke:red}`;
+  const filler = ".f{color:red}\n".repeat(600_000);
+  const css = `${selector}\n.r{background:url(https://evil.example/r.png)}\n${filler}.b{content:'x'}`;
+  const out = sanitizeCss(css);
+  assert.ok(out.startsWith(selector), out.slice(0, 200));
+  // The url() after the escaped quote is outside any string, as in the browser.
+  assert.ok(out.includes(".r{background:none}"), out.slice(0, 200));
+  assert.ok(out.endsWith(`${filler}.b{content:'x'}`));
+});
+
+test("sanitizeCss reads a long identifier run once and still unescapes url and @import", () => {
+  // Base64 in an inlined image can hold a 160 KB run of letters and digits;
+  // the old escaped-name regex retried such a run from every start.
+  const run = "A1b2".repeat(50_000);
+  const out = sanitizeCss(
+    `.a{background:url(data:image/png;base64,${run})}\n.b{background:u\\72l(https://evil.example/b.png)}\n@\\69mport "https://evil.example/c.css";`,
+  );
+  assert.ok(out.includes(`url(data:image/png;base64,${run})`));
+  assert.doesNotMatch(out, /evil\.example/);
+  assert.doesNotMatch(out, /@import/);
+});
+
+test("sanitizeCss keeps the browser's string and comment boundaries", () => {
+  const out = sanitizeCss(
+    [
+      `.a{background:url("https://evil.example/x.png")}`,
+      `@import url(https://evil.example/i.css);`,
+      `.d{background:url("data:image/png;base64,AAAA")}`,
+      // An apostrophe in a comment opens no string, so the url() after it counts.
+      `/* don't */ .c{background:url(https://evil.example/c.png)}`,
+      // A newline ends a string; what follows it is CSS again.
+      `.s{content:"open`,
+      `}.n{background:url(https://evil.example/n.png)}`,
+      `.t{content:"https://evil.example/t.png"}`,
+      `.k{content:"it's fine"}`,
+    ].join("\n"),
+  );
+  assert.doesNotMatch(out, /evil\.example/);
+  assert.doesNotMatch(out, /@import/);
+  assert.ok(out.includes(`.a{background:none}`), out);
+  assert.ok(out.includes(`url("data:image/png;base64,AAAA")`), out);
+  assert.ok(out.includes(`/* don't */ .c{background:none}`), out);
+  assert.ok(out.includes(`.n{background:none}`), out);
+  assert.ok(out.includes(`.t{content:""}`), out);
+  assert.ok(out.includes(`.k{content:"it's fine"}`), out);
+});
+
 test("compose names an unknown snippet, frame or slot with near matches and exits non-zero", () => {
   const typo = scratchFile(
     "typo.html",

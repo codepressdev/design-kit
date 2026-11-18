@@ -659,12 +659,15 @@ function unescapeCss(value) {
     .replace(/\\(.)/g, "$1");
 }
 
-const CSS_URL_OR_STRING =
-  /url\(\s*(?:"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)'|((?:\\.|[^)\\])*))\s*\)|"((?:\\[\s\S]|[^"\\])*)"|'((?:\\[\s\S]|[^'\\])*)'/gi;
-
-/** An identifier with CSS escapes in it (`u\\72l`, `\\75rl`, `@\\69mport`). */
+/**
+ * An identifier run, escapes included (`u\\72l`, `\\75rl`, `@\\69mport`).
+ * Each run is matched once, first character to last; a run without an
+ * escape is left as it is. A regex that demanded the escape itself retried
+ * a long run (base64 in an inlined image) from every start, which is
+ * quadratic and stalled compose for minutes.
+ */
 const ESCAPED_NAME =
-  /(@?)((?:[a-z0-9_-]|\\[0-9a-f]{1,6}\s?|\\[^\n\r\f0-9a-f])*\\(?:[0-9a-f]{1,6}\s?|[^\n\r\f0-9a-f])(?:[a-z0-9_-]|\\[0-9a-f]{1,6}\s?|\\[^\n\r\f0-9a-f])*)(?=(\()?)/gi;
+  /(@?)((?:[a-z0-9_-]+|\\[0-9a-f]{1,6}\s?|\\[^\n\r\f0-9a-f])+)(?=(\()?)/gi;
 
 /**
  * A function name or at-keyword can be written with escapes and still work
@@ -674,6 +677,7 @@ const ESCAPED_NAME =
  */
 function unescapeFetchingNames(css) {
   return css.replace(ESCAPED_NAME, (whole, at, name, paren) => {
+    if (!name.includes("\\")) return whole;
     const plain = unescapeCss(name).toLowerCase();
     if (at && plain === "import") return "@import";
     if (!at && paren && (plain === "url" || plain === "src")) return plain;
@@ -688,19 +692,108 @@ function unescapeFetchingNames(css) {
  * resolved.
  */
 export function sanitizeCss(css) {
-  return unescapeFetchingNames(css)
-    .replace(/@import[^;]*;?/gi, "")
-    .replace(CSS_URL_OR_STRING, (whole, dq, sq, bare, str, sstr) => {
-      if (dq !== undefined || sq !== undefined || bare !== undefined) {
-        return isSafeUrl(unescapeCss((dq ?? sq ?? bare).trim()))
-          ? whole
-          : "none";
+  return replaceUrlsAndStrings(
+    unescapeFetchingNames(css).replace(/@import[^;]*;?/gi, ""),
+  );
+}
+
+const CSS_SPACE = /\s/;
+
+/**
+ * The end of a quoted string that opens at `start`, read as the browser
+ * does: a backslash escapes the next character (a backslash-newline is a
+ * line continuation) and an unescaped newline ends it as a bad string.
+ * Returns the index after the closing quote, or `bad: true` with the index
+ * of the newline (or the end of the text).
+ */
+function readCssString(css, start) {
+  const quote = css[start];
+  let pos = start + 1;
+  while (pos < css.length) {
+    const ch = css[pos];
+    if (ch === "\\") pos += 2;
+    else if (ch === quote) return { end: pos + 1, bad: false };
+    else if (ch === "\n" || ch === "\r" || ch === "\f")
+      return { end: pos, bad: true };
+    else pos += 1;
+  }
+  return { end: css.length, bad: true };
+}
+
+/** The `url(…)` that opens at `start`, or null when it does not close. */
+function readCssUrl(css, start) {
+  let pos = start + 4;
+  while (pos < css.length && CSS_SPACE.test(css[pos])) pos += 1;
+  let value;
+  if (css[pos] === '"' || css[pos] === "'") {
+    const string = readCssString(css, pos);
+    if (string.bad) return null;
+    value = css.slice(pos + 1, string.end - 1);
+    pos = string.end;
+    while (pos < css.length && CSS_SPACE.test(css[pos])) pos += 1;
+    if (css[pos] !== ")") return null;
+  } else {
+    const from = pos;
+    while (pos < css.length && css[pos] !== ")") {
+      if (css[pos] === "\\") {
+        if (pos + 1 >= css.length || css[pos + 1] === "\n") return null;
+        pos += 2;
+      } else pos += 1;
+    }
+    if (pos >= css.length) return null;
+    value = css.slice(from, pos);
+  }
+  return { end: pos + 1, value };
+}
+
+/**
+ * One linear pass over the CSS, tokenized as the browser reads it: a
+ * comment is inert and kept, an escape outside a string (`\'` in a Tailwind
+ * selector such as `[stroke=\'#ccc\']`) is part of an identifier and opens
+ * no string, a string ends at its quote or an unescaped newline. A `url()`
+ * outside the allowlist becomes `none`; a string naming a remote URL
+ * becomes `""`. Written as a scanner, not a regex: the regex this replaced
+ * recursed once per character of a match, so an escaped quote that paired
+ * with a quote megabytes later (past inlined fonts) overflowed the stack.
+ */
+function replaceUrlsAndStrings(css) {
+  let out = "";
+  let copied = 0;
+  let pos = 0;
+  const replace = (start, end, text) => {
+    out += css.slice(copied, start) + text;
+    copied = end;
+  };
+  while (pos < css.length) {
+    const ch = css[pos];
+    if (ch === "/" && css[pos + 1] === "*") {
+      const close = css.indexOf("*/", pos + 2);
+      pos = close < 0 ? css.length : close + 2;
+    } else if (ch === "\\") {
+      pos += css[pos + 1] === "\n" ? 1 : 2;
+    } else if (
+      (ch === "u" || ch === "U") &&
+      css.slice(pos, pos + 4).toLowerCase() === "url("
+    ) {
+      const url = readCssUrl(css, pos);
+      if (!url) {
+        pos += 1;
+        continue;
       }
-      const text = unescapeCss(str ?? sstr);
-      return /^\s*[a-z][a-z0-9+.-]*:|^\s*\/\//i.test(text) && !isSafeUrl(text)
-        ? '""'
-        : whole;
-    });
+      if (!isSafeUrl(unescapeCss(url.value.trim())))
+        replace(pos, url.end, "none");
+      pos = url.end;
+    } else if (ch === '"' || ch === "'") {
+      const string = readCssString(css, pos);
+      const text = unescapeCss(
+        css.slice(pos + 1, string.bad ? string.end : string.end - 1),
+      );
+      if (/^\s*[a-z][a-z0-9+.-]*:|^\s*\/\//i.test(text) && !isSafeUrl(text))
+        replace(pos, string.end, '""');
+      pos = string.end;
+    } else pos += 1;
+  }
+  return out + css.slice(copied);
 }
 
 const ASSET_TYPES = {
