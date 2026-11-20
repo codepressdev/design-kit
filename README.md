@@ -661,12 +661,13 @@ the end of the body (no network, no storage; it works in a
 `sandbox="allow-scripts"` frame). A page that uses none of them composes
 exactly as before.
 
-| Attribute                                       | What a click does                                                                                                                                                                                    |
-| ----------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `data-kit-toggle="<id>"` on a trigger           | Shows or hides the element with that id and sets `aria-expanded`. A click outside it, or Esc, closes what a toggle opened.                                                                           |
-| `data-kit-tabs` on a container                  | Its `[data-kit-tab="<name>"]` triggers show the matching `[data-kit-panel="<name>"]` and hide the others, with `aria-selected`. The first tab starts selected unless one has `aria-selected="true"`. |
-| `data-kit-state="<group>:<name>"` on each state | Nothing by itself: the group starts in the state of its first element without `hidden`.                                                                                                              |
-| `data-kit-set="<group>:<name>"` on a trigger    | Shows every element of the group in that state and hides the rest of the group.                                                                                                                      |
+| Attribute                                               | What it does                                                                                                                                                                                         |
+| ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `data-kit-toggle="<id>"` on a trigger                   | Shows or hides the element with that id and sets `aria-expanded`. A click outside it, or Esc, closes what a toggle opened.                                                                           |
+| `data-kit-tabs` on a container                          | Its `[data-kit-tab="<name>"]` triggers show the matching `[data-kit-panel="<name>"]` and hide the others, with `aria-selected`. The first tab starts selected unless one has `aria-selected="true"`. |
+| `data-kit-state="<group>:<name>"` on each state         | Nothing by itself: the group starts in the state of its first element without `hidden`.                                                                                                              |
+| `data-kit-set="<group>:<name>"` on a trigger            | Shows every element of the group in that state and hides the rest of the group.                                                                                                                      |
+| `data-kit-after="<ms>:<state>"` on a `[data-kit-state]` | Transitions after `<ms>` ms (clamped to 50–10000 ms) when entered via click, keyboard or a chained timer (never on initial page load). Use `"<ms>:<group>:<state>"` to target another group.         |
 
 To make captured stories interactive, compose each state as its own snippet
 and put the attributes on the `<kit-snippet>`: they (and `hidden`) are copied
@@ -689,7 +690,27 @@ included.
 
 A click anywhere on the closed story shows the open one, and a click on the
 open one goes back. Links and buttons inside a trigger only switch the state;
-they do not navigate or submit. A trigger that already has `data-state`
+they do not navigate or submit.
+
+For click → loading → done flows (with a reset), put `data-kit-after` on the
+transient state. Switching the group again before the timer fires cancels the
+pending transition:
+
+```html
+<div data-kit-state="save:idle">
+  <button type="button" data-kit-set="save:loading">Save changes</button>
+</div>
+<div data-kit-state="save:loading" data-kit-after="800:done" hidden>
+  Saving…
+  <button type="button" data-kit-set="save:idle">Cancel</button>
+</div>
+<div data-kit-state="save:done" hidden>
+  Saved.
+  <button type="button" data-kit-set="save:idle">Reset</button>
+</div>
+```
+
+A trigger that already has `data-state`
 (Radix-style markup) gets `open`/`closed` or `active`/`inactive` there too, so
 its own styling follows, and a trigger that is not a button or link gets
 `tabindex="0"` so Enter and Space work. Elements the behaviours hide are

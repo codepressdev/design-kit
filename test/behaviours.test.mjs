@@ -183,6 +183,43 @@ test("a <kit-snippet> passes hidden and behaviour attributes to each root it exp
   assert.equal((html.match(/<script data-kit-behaviours>/g) ?? []).length, 1);
 });
 
+test("data-kit-after survives compose, injects the behaviour script and carries across <kit-snippet>", () => {
+  const direct = page(
+    `<button data-kit-set="save:loading">Save</button>
+<div data-kit-state="save:idle">Idle</div>
+<div data-kit-state="save:loading" data-kit-after="60:done" hidden>Saving…</div>
+<div data-kit-state="save:done" hidden>Saved</div>`,
+  );
+  assert.match(
+    direct,
+    /<div data-kit-state="save:loading" data-kit-after="60:done" hidden>/,
+  );
+  assert.equal((direct.match(/<script data-kit-behaviours>/g) ?? []).length, 1);
+
+  const afterOnly = page(`<div data-kit-after="60:save:done">Wait</div>`);
+  assert.match(afterOnly, /<div data-kit-after="60:save:done">/);
+  assert.equal(
+    (afterOnly.match(/<script data-kit-behaviours>/g) ?? []).length,
+    1,
+  );
+
+  const snippet = page(
+    `<kit-snippet id="story:primitives-dialog--open@1280" data-kit-state="save:loading" data-kit-after="60:done" hidden></kit-snippet>`,
+  );
+  assert.match(
+    snippet,
+    /<button data-kit-snippet="story:primitives-dialog--open@1280" hidden="" data-kit-state="save:loading" data-kit-after="60:done" type="button">/,
+  );
+  assert.match(
+    snippet,
+    /<div data-kit-snippet="story:primitives-dialog--open@1280" hidden="" data-kit-state="save:loading" data-kit-after="60:done" role="dialog"/,
+  );
+  assert.equal(
+    (snippet.match(/<script data-kit-behaviours>/g) ?? []).length,
+    1,
+  );
+});
+
 test("the sanitizer keeps native interactivity", () => {
   const markup = `<button popovertarget="p" popovertargetaction="toggle" aria-haspopup="menu" aria-expanded="false">Open</button>
 <div id="p" popover="auto" role="menu" hidden>Menu</div>

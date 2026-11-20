@@ -852,6 +852,7 @@ const BEHAVIOUR_ATTRS = [
   "data-kit-panel",
   "data-kit-state",
   "data-kit-set",
+  "data-kit-after",
 ];
 
 /**
@@ -879,6 +880,10 @@ const SHOW_TRIGGERS_CSS =
  *   others and sets `aria-selected`.
  * - `data-kit-set="<group>:<name>"` shows every `[data-kit-state]` of the
  *   group in that state and hides the rest of the group.
+ * - `data-kit-after="<ms>:<state>"` (or `"<ms>:<group>:<state>"`) on a
+ *   `[data-kit-state]` element schedules a transition after `<ms>` ms
+ *   (clamped to 50–10000 ms) whenever that state is entered by a user
+ *   action or chained timer, never on initial page boot.
  *
  * A trigger that already has `data-state` (Radix-style markup) gets
  * open/closed or active/inactive there as well, so its captured styling
@@ -960,11 +965,44 @@ const BEHAVIOURS_JS = `(function () {
     });
   }
 
-  function setState(group, name) {
+  var timers = Object.create(null);
+  function parseAfter(value, defaultGroup) {
+    if (!value) return null;
+    var first = value.indexOf(":");
+    if (first <= 0) return null;
+    var msStr = value.slice(0, first).trim();
+    if (!/^\\d+$/.test(msStr)) return null;
+    var rest = value.slice(first + 1);
+    if (!rest) return null;
+    var second = rest.indexOf(":");
+    var targetGroup = second < 0 ? defaultGroup : rest.slice(0, second);
+    var targetName = second < 0 ? rest : rest.slice(second + 1);
+    if (!targetGroup || !targetName) return null;
+    var delay = Math.min(10000, Math.max(50, parseInt(msStr, 10)));
+    return { delay: delay, group: targetGroup, name: targetName };
+  }
+  function setState(group, name, allowAfter) {
+    if (timers[group]) {
+      clearTimeout(timers[group]);
+      delete timers[group];
+    }
+    var next = null;
     list("[data-kit-state]").forEach(function (el) {
       var state = pair(el.getAttribute("data-kit-state"));
-      if (state && state[0] === group) show(el, state[1] === name);
+      if (state && state[0] === group) {
+        var on = state[1] === name;
+        show(el, on);
+        if (on && allowAfter && !next && el.hasAttribute("data-kit-after")) {
+          next = parseAfter(el.getAttribute("data-kit-after"), group);
+        }
+      }
     });
+    if (next) {
+      timers[group] = setTimeout(function () {
+        delete timers[group];
+        setState(next.group, next.name, true);
+      }, next.delay);
+    }
   }
 
   list("[data-kit-toggle]").forEach(function (t) {
@@ -991,7 +1029,7 @@ const BEHAVIOURS_JS = `(function () {
     if (state && !(state[0] in groups) && !el.hasAttribute("hidden")) groups[state[0]] = state[1];
   });
   Object.keys(groups).forEach(function (group) {
-    setState(group, groups[group]);
+    setState(group, groups[group], false);
   });
   list("[data-kit-set]").forEach(focusable);
 
@@ -1006,7 +1044,7 @@ const BEHAVIOURS_JS = `(function () {
     var control = el.closest("a,button");
     if (control && trigger.contains(control)) event.preventDefault();
     var state = pair(trigger.getAttribute("data-kit-set"));
-    if (state) setState(state[0], state[1]);
+    if (state) setState(state[0], state[1], true);
     var box = trigger.hasAttribute("data-kit-tab") && trigger.closest("[data-kit-tabs]");
     if (box) selectTab(box, trigger.getAttribute("data-kit-tab"));
     if (trigger.hasAttribute("data-kit-toggle")) {

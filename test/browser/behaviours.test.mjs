@@ -123,3 +123,141 @@ test("taps work the same at 390×844 on a touch screen", async () => {
     await context.close();
   }
 });
+
+const AFTER_FRAGMENT = `<button data-kit-set="save:loading" data-testid="save-btn">Save</button>
+<button data-kit-set="save:idle" data-testid="reset-btn">Reset</button>
+<div data-kit-state="save:idle" data-testid="save-idle">Idle</div>
+<div data-kit-state="save:loading" data-kit-after="60:done" data-testid="save-loading" hidden>Saving…</div>
+<div data-kit-state="save:done" data-testid="save-done" hidden>Saved</div>
+
+<div data-kit-state="boot:initial" data-kit-after="60:changed" data-testid="boot-initial">Initial</div>
+<div data-kit-state="boot:changed" data-testid="boot-changed" hidden>Changed</div>
+
+<button data-kit-set="cross:go" data-testid="cross-btn">Cross</button>
+<button data-kit-set="cross:idle" data-testid="cross-reset">Cross Reset</button>
+<div data-kit-state="cross:idle" data-testid="cross-idle">Cross Idle</div>
+<div data-kit-state="cross:go" data-kit-after="60:toast:shown" data-testid="cross-go" hidden>Cross Go</div>
+<div data-kit-state="toast:hidden" data-testid="toast-hidden">No toast</div>
+<div data-kit-state="toast:shown" data-testid="toast-shown" hidden>Toast shown</div>
+
+<button data-kit-set="clamp:go" data-testid="clamp-btn">Clamp</button>
+<div data-kit-state="clamp:idle" data-testid="clamp-idle">Clamp Idle</div>
+<div data-kit-state="clamp:go" data-kit-after="10:done" data-testid="clamp-go" hidden>Clamp Go</div>
+<div data-kit-state="clamp:done" data-testid="clamp-done" hidden>Clamp Done</div>
+
+<button data-kit-set="bad:a" data-testid="bad-a-btn">Bad A</button>
+<button data-kit-set="bad:b" data-testid="bad-b-btn">Bad B</button>
+<button data-kit-set="bad:c" data-testid="bad-c-btn">Bad C</button>
+<div data-kit-state="bad:idle" data-testid="bad-idle">Bad Idle</div>
+<div data-kit-state="bad:a" data-kit-after="abc:done" data-testid="bad-a" hidden>Bad A</div>
+<div data-kit-state="bad:b" data-kit-after="" data-testid="bad-b" hidden>Bad B</div>
+<div data-kit-state="bad:c" data-kit-after="100:" data-testid="bad-c" hidden>Bad C</div>
+<div data-kit-state="bad:done" data-testid="bad-done" hidden>Bad Done</div>
+<script>document.body.setAttribute("data-after-ready", "1");</script>`;
+
+const afterHtml = compose(kit, {
+  frame: "route:orchestrator@1280",
+  slots: [{ name: "main", content: AFTER_FRAGMENT }],
+});
+const afterHost = `<!doctype html><iframe sandbox="allow-scripts" style="width:100%;height:100vh;border:0" srcdoc="${afterHtml
+  .replace(/&/g, "&amp;")
+  .replace(/"/g, "&quot;")}"></iframe>`;
+
+async function openAfter({ fakeClock = false } = {}) {
+  const context = await browser.newContext({
+    viewport: { width: 1280, height: 800 },
+  });
+  const page = await context.newPage();
+  const errors = [];
+  page.on("pageerror", (err) => errors.push(err));
+  if (fakeClock) {
+    await page.clock.install({ time: 1000 });
+    await page.clock.pauseAt(1000);
+  }
+  await page.setContent(afterHost);
+  const frame = page.frameLocator("iframe");
+  await frame.locator("body[data-after-ready]").waitFor({ state: "attached" });
+  return { context, page, frame, errors };
+}
+
+test("data-kit-after transitions on user action, cancels on reset, skips boot, supports cross-group, clamps delay, and ignores malformed values", async () => {
+  const { context, page, frame, errors } = await openAfter({ fakeClock: true });
+  try {
+    // Initial boot does NOT auto-fire data-kit-after on an initially visible state.
+    assert.equal(await visible(frame, "boot-initial"), true);
+    assert.equal(await visible(frame, "boot-changed"), false);
+    await page.clock.runFor(500);
+    assert.equal(await visible(frame, "boot-initial"), true);
+    assert.equal(await visible(frame, "boot-changed"), false);
+
+    // Click -> loading -> auto-transition to done -> Reset back to idle.
+    assert.equal(await visible(frame, "save-idle"), true);
+    await frame.getByTestId("save-btn").click();
+    assert.equal(await visible(frame, "save-loading"), true);
+    assert.equal(await visible(frame, "save-done"), false);
+    await page.clock.runFor(59);
+    assert.equal(await visible(frame, "save-loading"), true);
+    assert.equal(await visible(frame, "save-done"), false);
+    await page.clock.runFor(1);
+    assert.equal(await visible(frame, "save-loading"), false);
+    assert.equal(await visible(frame, "save-done"), true);
+    await frame.getByTestId("reset-btn").click();
+    assert.equal(await visible(frame, "save-idle"), true);
+    assert.equal(await visible(frame, "save-done"), false);
+
+    // Rapid Reset before delay cancels pending timer so done never overwrites idle.
+    await frame.getByTestId("save-btn").click();
+    assert.equal(await visible(frame, "save-loading"), true);
+    await page.clock.runFor(30);
+    await frame.getByTestId("reset-btn").click();
+    assert.equal(await visible(frame, "save-idle"), true);
+    await page.clock.runFor(500);
+    assert.equal(await visible(frame, "save-idle"), true);
+    assert.equal(await visible(frame, "save-done"), false);
+
+    // Delay below 50ms is clamped to 50ms.
+    await frame.getByTestId("clamp-btn").click();
+    assert.equal(await visible(frame, "clamp-go"), true);
+    await page.clock.runFor(49);
+    assert.equal(await visible(frame, "clamp-go"), true);
+    assert.equal(await visible(frame, "clamp-done"), false);
+    await page.clock.runFor(1);
+    assert.equal(await visible(frame, "clamp-done"), true);
+
+    // Cross-group data-kit-after="<ms>:<otherGroup>:<state>" transitions the target group.
+    assert.equal(await visible(frame, "toast-hidden"), true);
+    assert.equal(await visible(frame, "toast-shown"), false);
+    await frame.getByTestId("cross-btn").click();
+    assert.equal(await visible(frame, "cross-go"), true);
+    await page.clock.runFor(60);
+    assert.equal(await visible(frame, "toast-hidden"), false);
+    assert.equal(await visible(frame, "toast-shown"), true);
+
+    // Malformed data-kit-after values do not throw or break state switching.
+    for (const id of ["a", "b", "c"]) {
+      await frame.getByTestId(`bad-${id}-btn`).click();
+      assert.equal(await visible(frame, `bad-${id}`), true);
+      await page.clock.runFor(500);
+      assert.equal(await visible(frame, `bad-${id}`), true);
+      assert.equal(await visible(frame, "bad-done"), false);
+    }
+    assert.deepEqual(errors, []);
+  } finally {
+    await context.close();
+  }
+});
+
+test("data-kit-after fires with the real browser clock in a sandboxed iframe", async () => {
+  const { context, frame, errors } = await openAfter({ fakeClock: false });
+  try {
+    await frame.getByTestId("save-btn").click();
+    assert.equal(await visible(frame, "save-loading"), true);
+    await frame.getByTestId("save-done").waitFor({ state: "visible" });
+    assert.equal(await visible(frame, "save-loading"), false);
+    await frame.getByTestId("reset-btn").click();
+    assert.equal(await visible(frame, "save-idle"), true);
+    assert.deepEqual(errors, []);
+  } finally {
+    await context.close();
+  }
+});

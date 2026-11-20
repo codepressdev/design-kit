@@ -244,6 +244,40 @@ test("figure --page on a composed page has no <script> and does not warn", () =>
   assert.equal(result.err, "");
 });
 
+test("figure --page on a composed interactive page strips <script> and renders only the initial visible state", () => {
+  const interactive = composedPage(
+    "light",
+    `<button data-kit-set="save:loading">Save</button>
+<div data-kit-state="save:idle">Idle state</div>
+<div data-kit-state="save:loading" data-kit-after="60:done" hidden>Loading state</div>
+<div data-kit-state="save:done" hidden>Done state</div>`,
+  );
+  assert.match(interactive, /<script data-kit-behaviours>/);
+  const page = join(dir, "interactive.html");
+  writeFileSync(page, interactive);
+  const out = join(dir, "interactive-figure.html");
+  const result = figure(["--page", page, "--out", out]);
+  assert.equal(result.code, 0, result.err);
+  assert.match(
+    result.err,
+    /^kit: warning: dropped 1 <script> element from .*interactive\.html; the figure is static$/,
+  );
+  const html = readFileSync(out, "utf8");
+  const tags = elements(html);
+  assert.ok(!tags.some((node) => node.name === "script"), "no <script> left");
+  assert.match(
+    html,
+    /\[data-kit-state\]\[hidden\][^{]*\{display:none !important\}/,
+  );
+  const states = tags.filter((node) => "data-kit-state" in node.attrs);
+  const byState = Object.fromEntries(
+    states.map((node) => [node.attrs["data-kit-state"], node]),
+  );
+  assert.ok(!("hidden" in byState["save:idle"].attrs));
+  assert.ok("hidden" in byState["save:loading"].attrs);
+  assert.ok("hidden" in byState["save:done"].attrs);
+});
+
 test("figure --page sizes: the frame's width, else 1280; --width, --fit and --height", () => {
   const sized = (page, extra = []) => {
     const file = join(dir, "sized.html");

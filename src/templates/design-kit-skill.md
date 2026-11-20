@@ -108,7 +108,25 @@ Write one HTML fragment per slot you change, in your scratch folder:
   `grep -c '\.<class>' "$KIT"/css/*.css`, or use an inline `style` with the
   app's variables.
 - To show several states of the new part, stack them inside the fragment, each
-  with a short label.
+  with a short label, or make them clickable with the declarative attributes
+  below.
+
+### Interactive states
+
+`compose` automatically inlines a small behaviour script when a fragment uses
+these attributes (no custom JavaScript needed; works in sandboxed frames):
+
+- `data-kit-state="<group>:<name>"` + `data-kit-set="<group>:<name>"`: switch
+  between states of a group on click (the first non-hidden element is the
+  initial state). Attributes on `<kit-snippet>` carry onto its expanded roots.
+- `data-kit-after="<ms>:<state>"` (or `"<ms>:<group>:<state>"`): on a
+  `[data-kit-state]` element, automatically transition after `<ms>` ms (clamped
+  to 50–10000 ms) when entered by click, keyboard or a chained timer — never on
+  initial page load. Switching the group cancels any pending timer.
+- `data-kit-toggle="<id>"`: show/hide the element with that id (closes on
+  outside click or Escape).
+- `data-kit-tabs` with `data-kit-tab="<name>"` and `data-kit-panel="<name>"`:
+  switch tab panels and update `aria-selected`.
 
 ## 5. Compose
 
