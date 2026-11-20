@@ -1,5 +1,11 @@
 # @codepress/design-kit
 
+## 0.16.0
+
+### Minor Changes
+
+- 0683832: Add declarative timed state transitions (`data-kit-after="<ms>:<state>"` and `data-kit-after="<ms>:<group>:<state>"`) to the built-in behaviour layer so composed mockups can model click → loading → next state and reset flows with zero custom JavaScript.
+
 ## 0.15.1
 
 ### Patch Changes
