@@ -1,5 +1,15 @@
 # @codepress/design-kit
 
+## 0.17.0
+
+### Minor Changes
+
+- aed63e5: Add `@codepress/design-kit/annotate`, a zero-dependency closed Shadow-DOM live-app annotation overlay (`<design-kit-annotator>`) and Redline Context Packet contract:
+  - **Browse ↔ Annotate workflow**: zero capture-phase pointer or keyboard interception in `Browse` or collapsed states so native clicks, modals, forms, and client routing work uninterrupted while queued redlines persist in `sessionStorage` across same-origin reloads.
+  - **Annotation tools & immediate per-step snapshots**: Pin, Region Box (with pairwise overlap px calculation), Move Arrow (`from` → `to`), and Freehand stroke with per-item notes, composited viewport callout PNGs (`<= 1 MiB` with cross-origin image placeholders), sanitized routes, viewport/theme metadata, framework source hints (React `_debugSource` / `_debugStack` with 250 ms same-origin `.map` resolution, Vue `__file`, Svelte `__svelte_meta`, `codepress-data-fp`), component owner chains, CSS selectors, trimmed `outerHTML`, and computed layout styles.
+  - **Pluggable Send to Fix transports**: HTTP POST, origin/source/channel-pinned iframe `postMessage` (`DK_ANNOTATE_*`), custom `onSubmit` callbacks, and Copy Packet fallback with inline non-blocking status toasts.
+  - **Embeddable runtime & formatters**: export `mountAnnotator`, `getAnnotatorRuntimeScript`, `sanitizeRedlinePacket`, `formatRedlineMarkdown`, and `formatRedlineXml` with TypeScript definitions.
+
 ## 0.16.0
 
 ### Minor Changes
