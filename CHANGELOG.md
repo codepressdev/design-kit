@@ -1,5 +1,15 @@
 # @codepress/design-kit
 
+## 0.18.0
+
+### Minor Changes
+
+- e7e9f3a: Add Vite dev plugin (`@codepress/design-kit/vite`), Next.js route/script helper (`@codepress/design-kit/next`), and zero-code `design-kit annotate` CLI proxy for live in-app annotation and local agent auto-fix.
+  - Injects `<design-kit-annotator>` in dev mode only (zero bytes in production `vite build` output unless both `enabled` and a remote `endpoint` are explicitly configured).
+  - Mounts a loopback `/__design-kit/fix` receiver guarded by a per-server random `X-Design-Kit-Token`, `Origin` verification, 8 MB body cap, and path-traversal checks.
+  - Writes `.design-kit/redlines/<timestamp>/packet.md`, `packet.json`, and `step-*.png`, updates `.design-kit/redlines/latest.md`, ensures `/.design-kit/redlines/` is in `.gitignore`, and optionally spawns `claude`, `codex`, `agy`, or a custom argv command asynchronously without shell interpolation.
+  - Documents live annotation and multi-step `.design-kit/redlines/` fixing in `README.md`, the installed `design-kit` skill, and `design-kit-setup`.
+
 ## 0.17.0
 
 ### Minor Changes
