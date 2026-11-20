@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import {
   chmodSync,
-  cpSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -562,17 +561,31 @@ test("in a depth-1 blobless clone, the kit's commit is fetched and compared (the
 });
 
 test("a tree git cannot read at the kit's commit builds, never reads as an absent path", () => {
-  // A copy of the history whose kit commit A cannot read its gone/ tree.
-  const broken = join(scratch, "broken");
-  cpSync(repoDir, broken, { recursive: true });
+  // A copy of the history whose kit commit A cannot read its gone/ tree: every
+  // object except that one tree goes through pack-objects, which reads them
+  // loose or packed alike. Deleting the tree's loose file instead fails with
+  // ENOENT as soon as git has packed the template (an auto gc, a newer git).
   const tree = execFileSync(
     "git",
-    ["-C", broken, "rev-parse", `${sha.A}:gone`],
-    {
-      encoding: "utf8",
-    },
+    ["-C", repoDir, "rev-parse", `${sha.A}:gone`],
+    { encoding: "utf8" },
   ).trim();
-  rmSync(join(broken, ".git", "objects", tree.slice(0, 2), tree.slice(2)));
+  const objects = execFileSync(
+    "git",
+    ["-C", repoDir, "rev-list", "--objects", "--all"],
+    { encoding: "utf8" },
+  )
+    .split("\n")
+    .filter((line) => line && line.split(" ")[0] !== tree);
+  const pack = execFileSync(
+    "git",
+    ["-C", repoDir, "pack-objects", "--stdout", "--quiet"],
+    { input: `${objects.join("\n")}\n` },
+  );
+  const broken = join(scratch, "broken");
+  mkdirSync(broken);
+  execFileSync("git", ["-C", broken, "init", "-q", "-b", "main"]);
+  execFileSync("git", ["-C", broken, "unpack-objects", "-q"], { input: pack });
   // gone/old.css really is absent at D, so equal "missing" ids would skip.
   const result = ciCheck({
     repoDir: broken,
