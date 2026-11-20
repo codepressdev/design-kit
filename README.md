@@ -405,6 +405,8 @@ design-kit capture stories [--config f] [--out dir] [--storybook-dir dir]
                            [--only id,... | --only-file f] [--base previous-kit]
 design-kit capture pages   [--config f] [--out dir] [--base-url url] [--only name,...]
                            [--ready name=selector] [--screenshots dir] [--timeout ms]
+design-kit annotate [url]  [--agent claude|codex|agy|<cmd>] [--agent-arg arg]
+                           [--port n] [--root dir] [--endpoint url] [--no-open]
 design-kit kit info|find|show|compose ...   [--kit dir]
 design-kit validate        [--config f]
 design-kit ci-check        [--config f] [--since sha --kit-created iso | --no-kit]
@@ -718,6 +720,103 @@ hidden even when their own CSS sets a `display`. Native interactivity needs
 nothing: `<details>`/`<summary>`, `popover` with `popovertarget`, form
 controls and `aria-*` all survive compose. Anything else is a few lines of
 your own `<script>` in the fragment.
+
+## Live in-app annotation (`Send to Fix`)
+
+Annotate your running app directly while using it—across routes, modals, and
+responsive viewports—and click **Send to Fix** to write a structured redline
+packet to `.design-kit/redlines/` and optionally dispatch your local coding
+agent (`claude`, `codex`, `agy`, or a custom command) or POST to a team webhook
+or CodePress cloud endpoint.
+
+### Zero-code CLI (any framework)
+
+Attach `<design-kit-annotator>` and the `/__design-kit/fix` receiver to any
+running local dev server without changing your app's code (macOS, Linux, and
+Windows):
+
+```bash
+npx @codepress/design-kit annotate http://localhost:3000 --agent claude
+# options: --agent claude|codex|agy|<cmd> --agent-arg <arg> --port <n> --root <dir> --endpoint <url> --no-open
+```
+
+### Vite dev plugin (`@codepress/design-kit/vite`)
+
+Injects `<design-kit-annotator>` in `serve` (dev) mode only. Production
+`vite build` output contains **zero** annotator bytes unless both `enabled: true`
+and a remote `endpoint` are explicitly configured.
+
+```ts
+// vite.config.ts
+import { defineConfig } from "vite";
+import { designKitAnnotate } from "@codepress/design-kit/vite";
+
+export default defineConfig({
+  plugins: [
+    designKitAnnotate({
+      agent: "claude", // "claude" | "codex" | "agy" | ["my-agent", "--fix"]
+    }),
+  ],
+});
+```
+
+### Next.js & custom servers (`@codepress/design-kit/next`)
+
+Mount a dev-only App Router route handler and a tiny client `<DesignKitAnnotator />`
+wrapper (or inject `getNextAnnotatorScript` / `getAnnotatorScriptHtml`). Set a
+shared `DESIGN_KIT_ANNOTATE_TOKEN` environment variable (or pass the same
+`token` option to both the route handler and the client/script helper) so both
+sides agree on `X-Design-Kit-Token`:
+
+```ts
+// app/api/design-kit/fix/route.ts
+import { createNextFixHandler } from "@codepress/design-kit/next";
+
+export const POST = createNextFixHandler({
+  agent: "claude",
+  token: process.env.DESIGN_KIT_ANNOTATE_TOKEN,
+});
+```
+
+```tsx
+// components/DesignKitAnnotator.tsx ("use client")
+"use client";
+import { useEffect } from "react";
+import { mountAnnotator } from "@codepress/design-kit/annotate";
+
+export function DesignKitAnnotator({ token }: { token: string }) {
+  useEffect(() => {
+    if (process.env.NODE_ENV === "production") return;
+    const ctrl = mountAnnotator({
+      transport: {
+        type: "http",
+        url: "/api/design-kit/fix",
+        headers: { "X-Design-Kit-Token": token },
+      },
+    });
+    return () => ctrl.destroy();
+  }, [token]);
+  return null;
+}
+```
+
+To forward redlines to a team webhook or CodePress cloud endpoint instead of
+writing locally, pass `endpoint` (and optional `headers`) to
+`designKitAnnotate`, `design-kit annotate --endpoint <url>`, or
+`mountAnnotator({ transport: { type: "http", url: endpoint, headers } })`.
+
+### What **Send to Fix** writes & security
+
+- Writes `.design-kit/redlines/<timestamp>/packet.md`, `packet.json`, and
+  `step-*.png`, updates `.design-kit/redlines/latest.md`, and ensures
+  `/.design-kit/redlines/` is listed once in `.gitignore`.
+- Guards `/__design-kit/fix` with a per-server random capability token
+  (`X-Design-Kit-Token`), loopback socket + `Origin` verification, an 8 MB body
+  cap, and path-traversal rejection (`..` / `\`).
+- Spawns local agents asynchronously with `shell: false` and safe argv arrays,
+  never shell-interpolating untrusted DOM content. On Windows, npm-installed
+  `.cmd` shims cannot be spawned with `shell: false`, so pass an `.exe` path or
+  explicit argv array (for example `["node", "path/to/agent-cli.js"]`).
 
 ## Programmatic use
 

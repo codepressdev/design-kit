@@ -138,3 +138,28 @@ The description says:
 
 After it merges, the workflow's first scheduled or manual run uploads the
 kit, and the repository's agents start composing mockups from it.
+
+## 7. Optional: live in-app annotation (`Send to Fix`)
+
+When the person also wants to annotate their running local app and send
+multi-step UI fixes directly to their coding agent (or a team webhook /
+CodePress endpoint):
+
+- **Zero-code CLI (any framework):** run
+  `npx @codepress/design-kit annotate http://localhost:3000 --agent claude`
+  (supports `claude`, `codex`, `agy`, or a custom command; `--no-open` skips
+  opening a browser tab).
+- **Vite dev plugin:** add `designKitAnnotate({ agent: "claude" })` from
+  `@codepress/design-kit/vite` to `vite.config.*`. It runs only in `serve`
+  (dev) mode and adds zero bytes to `vite build` production output unless both
+  `enabled: true` and a remote `endpoint` are explicitly configured.
+- **Next.js / React:** wire a dev-only route handler with
+  `createNextFixHandler` from `@codepress/design-kit/next` and mount
+  `<DesignKitAnnotator />` (via `mountAnnotator` from
+  `@codepress/design-kit/annotate` or `getNextAnnotatorScript`) in development,
+  or point `endpoint` at a webhook or CodePress cloud endpoint.
+
+Clicking **Send to Fix** writes `.design-kit/redlines/<timestamp>/packet.md`,
+`packet.json`, and `step-*.png`, updates `.design-kit/redlines/latest.md`,
+adds `/.design-kit/redlines/` to `.gitignore`, and optionally spawns the
+configured local agent to fix the annotated steps.

@@ -22,6 +22,14 @@
       "browser": "./src/annotate/browser.mjs",
       "default": "./src/annotate/index.mjs"
     },
+    "./vite": {
+      "types": "./src/vite.d.ts",
+      "default": "./src/vite.mjs"
+    },
+    "./next": {
+      "types": "./src/next.d.ts",
+      "default": "./src/next.mjs"
+    },
     "./schema.json": "./schema/design-kit.config.schema.json",
     "./package.json": "./package.json"
   },

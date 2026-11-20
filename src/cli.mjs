@@ -51,6 +51,11 @@ const USAGE = `usage: design-kit <command> [options]
   capture pages     capture the configured pages of a running app
       [--config <file>] [--out <dir>] [--base-url <url>] [--only <name,...>]
       [--ready <name>=<selector>] [--screenshots <dir>] [--timeout <ms>]
+  annotate [<url>]  attach live in-app annotation and Send to Fix to a running
+                    local server (zero code changes); writes .design-kit/redlines/
+                    and optionally spawns a local coding agent
+      [--agent claude|codex|agy|<cmd>] [--agent-arg <arg>]
+      [--port <n>] [--root <dir>] [--endpoint <url>] [--no-open]
   kit <info|find|show|compose> ...
                     look up and compose from a kit (\`design-kit kit --help\`)
       [--kit <dir>]   default: DESIGN_KIT_DIR, the config's "out", ./design-kit
@@ -282,6 +287,10 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
       return await captureStories(rest);
     if (command === "capture" && sub === "pages")
       return await capturePagesCommand(rest);
+    if (command === "annotate") {
+      const { annotateCommand } = await import("./annotate-cli.mjs");
+      return await annotateCommand(argv.slice(1));
+    }
     throw new ConfigError(`unknown command "${argv.join(" ")}"\n\n${USAGE}`);
   } catch (error) {
     if (error instanceof ConfigError) {
