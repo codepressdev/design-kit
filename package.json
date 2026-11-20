@@ -17,6 +17,11 @@
       "types": "./src/kit.d.ts",
       "default": "./src/kit.mjs"
     },
+    "./annotate": {
+      "types": "./src/annotate/index.d.ts",
+      "browser": "./src/annotate/browser.mjs",
+      "default": "./src/annotate/index.mjs"
+    },
     "./schema.json": "./schema/design-kit.config.schema.json",
     "./package.json": "./package.json"
   },
