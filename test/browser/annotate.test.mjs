@@ -111,6 +111,7 @@ before(async () => {
 <html>
 <head>
   <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
   <style>
     body { margin: 0; padding: 24px; font-family: system-ui, sans-serif; background: #0f172a; color: #f8fafc; }
     .header { display: flex; align-items: center; gap: 16px; margin-bottom: 20px; }
@@ -747,5 +748,550 @@ test("Annotate toolbar box drags freely anywhere in viewport and triggers onPopO
     );
   } finally {
     await context.close();
+  }
+});
+
+test("Mobile Annotate UX: mode ring & 1-tap Browse exit, anti-zoom 16px note sheet, and visualViewport keyboard clamping", async () => {
+  for (const vp of [
+    { width: 390, height: 844 },
+    { width: 320, height: 844 },
+  ]) {
+    const context = await browser.newContext({
+      viewport: vp,
+      hasTouch: true,
+      isMobile: true,
+    });
+    const page = await context.newPage();
+    const pageErrors = [];
+    page.on("pageerror", (err) => pageErrors.push(err));
+
+    try {
+      await page.addInitScript(() => {
+        const origAttachShadow = Element.prototype.attachShadow;
+        Element.prototype.attachShadow = function (init) {
+          const sr = origAttachShadow.call(this, init);
+          if (this.tagName?.toLowerCase() === "design-kit-annotator") {
+            window.__testShadowRoot = sr;
+          }
+          return sr;
+        };
+        const origFocus = HTMLElement.prototype.focus;
+        window.__focusCalls = [];
+        HTMLElement.prototype.focus = function (opts) {
+          if (this.tagName === "TEXTAREA") {
+            window.__focusCalls.push(opts ?? null);
+          }
+          return origFocus.call(this, opts);
+        };
+        // Mutable visualViewport shim so tests can simulate virtual keyboard shrink
+        const listeners = { resize: new Set(), scroll: new Set() };
+        const vv = {
+          width: window.innerWidth,
+          height: window.innerHeight,
+          offsetLeft: 0,
+          offsetTop: 0,
+          scale: 1,
+          addEventListener(type, fn) {
+            listeners[type]?.add(fn);
+          },
+          removeEventListener(type, fn) {
+            listeners[type]?.delete(fn);
+          },
+          __setHeight(nextH) {
+            vv.height = nextH;
+            for (const fn of listeners.resize) fn(new Event("resize"));
+          },
+        };
+        Object.defineProperty(window, "visualViewport", {
+          configurable: true,
+          get: () => vv,
+        });
+      });
+
+      await page.goto(`${appServer.url}/orders`);
+      await page.evaluate(() => {
+        window.__mobCtrl = window.__designKitAnnotate.mountAnnotator({
+          initialMode: "annotate",
+          initialTool: "pin",
+          storageKey: false,
+        });
+      });
+
+      // 1. Annotate mode shows red perimeter ring and visible top mode-banner pill
+      const annotateCheck = await page.evaluate(() => {
+        const sr = window.__testShadowRoot;
+        const capture = sr.querySelector(".dk-capture");
+        const bannerRect = window.__mobCtrl.getControlRect("mode-banner");
+        const barRect = window.__mobCtrl.getControlRect("bar");
+        return {
+          captureHidden: capture.hidden,
+          captureBoxShadow: getComputedStyle(capture).boxShadow,
+          bannerRect,
+          barHeightAnnotate: barRect.height,
+        };
+      });
+      assert.equal(annotateCheck.captureHidden, false);
+      assert.match(
+        annotateCheck.captureBoxShadow,
+        /rgba?\(239,\s*68,\s*68/,
+        `expected red perimeter ring on .dk-capture, got ${annotateCheck.captureBoxShadow}`,
+      );
+      assert.ok(
+        annotateCheck.bannerRect && annotateCheck.bannerRect.width > 100,
+        `expected visible mode-banner at ${vp.width}px`,
+      );
+
+      // 2. Drop a pin -> opens note sheet with >=16px font and focus({ preventScroll: true })
+      await page.mouse.click(120, 180);
+      await page.waitForFunction(
+        () => window.__mobCtrl.getItems().length === 1,
+      );
+
+      const noteCheck = await page.evaluate(() => {
+        const sr = window.__testShadowRoot;
+        const ta = sr.querySelector(".dk-popover textarea");
+        const fontSize = parseFloat(getComputedStyle(ta).fontSize);
+        const popRect = window.__mobCtrl.getControlRect("popover");
+        const saveRect = window.__mobCtrl.getControlRect("note-save");
+        const browseRect = window.__mobCtrl.getControlRect("mode-browse");
+        return {
+          fontSize,
+          focusCalls: window.__focusCalls.slice(),
+          popRect,
+          saveRect,
+          browseRect,
+        };
+      });
+      assert.ok(
+        noteCheck.fontSize >= 16,
+        `expected textarea font-size >= 16px at ${vp.width}px, got ${noteCheck.fontSize}`,
+      );
+      assert.ok(
+        noteCheck.focusCalls.some((c) => c && c.preventScroll === true),
+        `expected focus({ preventScroll: true }), got ${JSON.stringify(noteCheck.focusCalls)}`,
+      );
+
+      // 3. Simulate virtual keyboard shrinking visualViewport.height to 460px
+      const kbdCheck = await page.evaluate(() => {
+        window.visualViewport.__setHeight(460);
+        const sr = window.__testShadowRoot;
+        const pop = sr.querySelector(".dk-popover").getBoundingClientRect();
+        const save = window.__mobCtrl.getControlRect("note-save");
+        const done = sr
+          .querySelector(".dk-popover-actions button:first-child")
+          .getBoundingClientRect();
+        return {
+          pop: {
+            left: pop.left,
+            top: pop.top,
+            right: pop.right,
+            bottom: pop.bottom,
+          },
+          save,
+          done: {
+            left: done.left,
+            top: done.top,
+            right: done.right,
+            bottom: done.bottom,
+          },
+        };
+      });
+      assert.ok(
+        kbdCheck.pop.left >= 0 &&
+          kbdCheck.pop.right <= vp.width &&
+          kbdCheck.pop.top >= 0 &&
+          kbdCheck.pop.bottom <= 460,
+        `popover escaped [0, ${vp.width}] x [0, 460]: ${JSON.stringify(kbdCheck.pop)}`,
+      );
+      assert.ok(
+        kbdCheck.save.y >= 0 &&
+          kbdCheck.save.y + kbdCheck.save.height <= 460 &&
+          kbdCheck.done.top >= 0 &&
+          kbdCheck.done.bottom <= 460,
+        `Save note / Done outside keyboard-safe viewport: ${JSON.stringify(kbdCheck)}`,
+      );
+
+      // Restore full viewport height and save note
+      await page.evaluate(() => {
+        window.visualViewport.__setHeight(844);
+      });
+      const saveRect = await page.evaluate(() =>
+        window.__mobCtrl.getControlRect("note-save"),
+      );
+      await page.mouse.click(saveRect.centerX, saveRect.centerY);
+
+      // 4. Tap mode-banner -> switches to Browse, hides banner & captureLayer, collapses dock to 1 row, lets page clicks through
+      const bannerRect = await page.evaluate(() =>
+        window.__mobCtrl.getControlRect("mode-banner"),
+      );
+      await page.mouse.click(bannerRect.centerX, bannerRect.centerY);
+
+      const browseCheck = await page.evaluate(() => {
+        const sr = window.__testShadowRoot;
+        return {
+          mode: window.__mobCtrl.getMode(),
+          captureHidden: sr.querySelector(".dk-capture").hidden,
+          bannerHidden: sr.querySelector(".dk-mode-banner").hidden,
+          barHeightBrowse: window.__mobCtrl.getControlRect("bar").height,
+        };
+      });
+      assert.equal(browseCheck.mode, "browse");
+      assert.equal(browseCheck.captureHidden, true);
+      assert.equal(browseCheck.bannerHidden, true);
+      assert.ok(
+        browseCheck.barHeightBrowse < annotateCheck.barHeightAnnotate - 15,
+        `expected Browse dock (${browseCheck.barHeightBrowse}px) to collapse below Annotate dock (${annotateCheck.barHeightAnnotate}px)`,
+      );
+
+      // Underlying app button is clickable in Browse mode
+      await page.locator("#open-order-btn").click();
+      assert.equal(
+        await page.evaluate(() => window.location.pathname),
+        "/orders/42",
+      );
+      assert.deepEqual(pageErrors, []);
+    } finally {
+      await context.close();
+    }
+  }
+});
+
+test("Mobile Pin touch scroll pass-through ignores >12px drags while preserving short taps and box/arrow/freehand drags", async () => {
+  const context = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    hasTouch: true,
+    isMobile: true,
+  });
+  const page = await context.newPage();
+
+  try {
+    await page.addInitScript(() => {
+      const origAttachShadow = Element.prototype.attachShadow;
+      Element.prototype.attachShadow = function (init) {
+        const sr = origAttachShadow.call(this, init);
+        if (this.tagName?.toLowerCase() === "design-kit-annotator") {
+          window.__testShadowRoot = sr;
+        }
+        return sr;
+      };
+    });
+
+    await page.goto(`${appServer.url}/orders`);
+    await page.evaluate(() => {
+      window.__touchCtrl = window.__designKitAnnotate.mountAnnotator({
+        initialMode: "annotate",
+        initialTool: "pin",
+        storageKey: false,
+      });
+    });
+
+    // Pin tool has touch-action: pan-y; box/arrow/freehand retain touch-action: none
+    const touchActions = await page.evaluate(() => {
+      const sr = window.__testShadowRoot;
+      const cap = sr.querySelector(".dk-capture");
+      const out = {};
+      for (const t of ["pin", "box", "arrow", "freehand"]) {
+        window.__touchCtrl.setTool(t);
+        out[t] = getComputedStyle(cap).touchAction;
+      }
+      window.__touchCtrl.setTool("pin");
+      return out;
+    });
+    assert.equal(touchActions.pin, "pan-y");
+    assert.equal(touchActions.box, "none");
+    assert.equal(touchActions.arrow, "none");
+    assert.equal(touchActions.freehand, "none");
+
+    // Touch drag > 12px in Pin mode must NOT create a pin or open popover
+    await page.evaluate(() => {
+      const cap = window.__testShadowRoot.querySelector(".dk-capture");
+      cap.dispatchEvent(
+        new PointerEvent("pointerdown", {
+          bubbles: true,
+          cancelable: true,
+          pointerId: 1,
+          pointerType: "touch",
+          clientX: 180,
+          clientY: 300,
+        }),
+      );
+      cap.dispatchEvent(
+        new PointerEvent("pointermove", {
+          bubbles: true,
+          cancelable: true,
+          pointerId: 1,
+          pointerType: "touch",
+          clientX: 180,
+          clientY: 240,
+        }),
+      );
+      cap.dispatchEvent(
+        new PointerEvent("pointerup", {
+          bubbles: true,
+          cancelable: true,
+          pointerId: 1,
+          pointerType: "touch",
+          clientX: 180,
+          clientY: 240,
+        }),
+      );
+    });
+    await page.evaluate(
+      () => new Promise((resolve) => requestAnimationFrame(() => resolve())),
+    );
+    assert.equal(
+      await page.evaluate(() => window.__touchCtrl.getItems().length),
+      0,
+      "touch drag >12px in Pin mode must not create a pin",
+    );
+    assert.equal(
+      await page.evaluate(() => window.__touchCtrl.getControlRect("popover")),
+      null,
+      "touch drag >12px in Pin mode must not open popover",
+    );
+
+    // Short touch tap (<= 12px) in Pin mode DOES create a pin and open popover
+    await page.evaluate(() => {
+      const cap = window.__testShadowRoot.querySelector(".dk-capture");
+      cap.dispatchEvent(
+        new PointerEvent("pointerdown", {
+          bubbles: true,
+          cancelable: true,
+          pointerId: 2,
+          pointerType: "touch",
+          clientX: 180,
+          clientY: 200,
+        }),
+      );
+      cap.dispatchEvent(
+        new PointerEvent("pointerup", {
+          bubbles: true,
+          cancelable: true,
+          pointerId: 2,
+          pointerType: "touch",
+          clientX: 184,
+          clientY: 204,
+        }),
+      );
+    });
+    await page.waitForFunction(
+      () => window.__touchCtrl.getItems().length === 1,
+    );
+    assert.ok(
+      await page.evaluate(() => window.__touchCtrl.getControlRect("popover")),
+      "short touch tap in Pin mode should open popover",
+    );
+
+    // Box tool with touch drag > 12px DOES create a box
+    await page.evaluate(() => {
+      window.__touchCtrl.setTool("box");
+      const cap = window.__testShadowRoot.querySelector(".dk-capture");
+      cap.dispatchEvent(
+        new PointerEvent("pointerdown", {
+          bubbles: true,
+          cancelable: true,
+          pointerId: 3,
+          pointerType: "touch",
+          clientX: 60,
+          clientY: 120,
+        }),
+      );
+      cap.dispatchEvent(
+        new PointerEvent("pointermove", {
+          bubbles: true,
+          cancelable: true,
+          pointerId: 3,
+          pointerType: "touch",
+          clientX: 180,
+          clientY: 220,
+        }),
+      );
+      cap.dispatchEvent(
+        new PointerEvent("pointerup", {
+          bubbles: true,
+          cancelable: true,
+          pointerId: 3,
+          pointerType: "touch",
+          clientX: 180,
+          clientY: 220,
+        }),
+      );
+    });
+    await page.waitForFunction(
+      () => window.__touchCtrl.getItems().length === 2,
+    );
+    assert.equal(
+      await page.evaluate(() => window.__touchCtrl.getItems()[1].kind),
+      "box",
+    );
+  } finally {
+    await context.close();
+  }
+});
+
+test("Tightest layout-matrix zero-spill check (320x844, 390x844, 1280x800) with 3 chips + open note + desktop/PiP parity", async () => {
+  for (const vp of [
+    { width: 320, height: 844, mobile: true },
+    { width: 390, height: 844, mobile: true },
+    { width: 1280, height: 800, mobile: false },
+  ]) {
+    const context = await browser.newContext({
+      viewport: { width: vp.width, height: vp.height },
+      hasTouch: vp.mobile,
+      isMobile: vp.mobile,
+    });
+    const page = await context.newPage();
+
+    try {
+      await page.addInitScript(() => {
+        const origAttachShadow = Element.prototype.attachShadow;
+        Element.prototype.attachShadow = function (init) {
+          const sr = origAttachShadow.call(this, init);
+          if (this.tagName?.toLowerCase() === "design-kit-annotator") {
+            window.__testShadowRoot = sr;
+          }
+          return sr;
+        };
+      });
+
+      await page.goto(`${appServer.url}/orders`);
+      await page.evaluate(() => {
+        window.__matCtrl = window.__designKitAnnotate.mountAnnotator({
+          initialMode: "annotate",
+          initialTool: "pin",
+          storageKey: false,
+        });
+      });
+
+      // Drop 3 pins; keep the 3rd pin's note popover open
+      for (const [idx, pt] of [
+        [1, [70, 120]],
+        [2, [140, 200]],
+        [3, [210, 280]],
+      ]) {
+        await page.mouse.click(pt[0], pt[1]);
+        await page.waitForFunction(
+          (expected) => window.__matCtrl.getItems().length === expected,
+          idx,
+        );
+        if (idx < 3) {
+          const save = await page.evaluate(() =>
+            window.__matCtrl.getControlRect("note-save"),
+          );
+          await page.mouse.click(save.centerX, save.centerY);
+        }
+      }
+
+      const check = await page.evaluate(() => {
+        const sr = window.__testShadowRoot;
+        const bounds = window.__matCtrl.getUiBounds();
+        const saveRect = window.__matCtrl.getControlRect("note-save");
+        const browseRect = window.__matCtrl.getControlRect("mode-browse");
+        const bannerRect = window.__matCtrl.getControlRect("mode-banner");
+        const saveHit = sr.elementFromPoint(saveRect.centerX, saveRect.centerY);
+        const browseHit = sr.elementFromPoint(
+          browseRect.centerX,
+          browseRect.centerY,
+        );
+        const taFont = parseFloat(
+          getComputedStyle(sr.querySelector(".dk-popover textarea")).fontSize,
+        );
+        return {
+          bounds,
+          scrollWidth: document.documentElement.scrollWidth,
+          saveRect,
+          browseRect,
+          bannerRect,
+          saveHitText: saveHit?.textContent?.trim() || "",
+          browseHitText: browseHit?.textContent?.trim() || "",
+          taFont,
+        };
+      });
+
+      assert.ok(
+        check.scrollWidth <= vp.width,
+        `horizontal document overflow at ${vp.width}px: scrollWidth=${check.scrollWidth}`,
+      );
+      for (const b of check.bounds) {
+        assert.ok(
+          b.left >= 0 && b.right <= vp.width,
+          `horizontal spill on ${b.name} at ${vp.width}px: [${b.left}, ${b.right}]`,
+        );
+        assert.ok(
+          b.top >= 0 && b.bottom <= vp.height,
+          `vertical spill on ${b.name} at ${vp.width}px: [${b.top}, ${b.bottom}]`,
+        );
+      }
+      assert.equal(
+        check.saveHitText,
+        "Save note",
+        `Save note covered at ${vp.width}px (hit: ${check.saveHitText})`,
+      );
+      assert.equal(
+        check.browseHitText,
+        "Browse",
+        `Browse covered at ${vp.width}px (hit: ${check.browseHitText})`,
+      );
+
+      if (vp.mobile) {
+        assert.ok(
+          check.bounds.some((b) => b.name.includes("dk-mode-banner")),
+          `mode-banner missing from getUiBounds at ${vp.width}px`,
+        );
+        assert.ok(check.taFont >= 16);
+      } else {
+        // Desktop parity: mode-banner hidden, 12px desktop textarea, and narrow PiP keeps static dock
+        assert.equal(
+          check.bounds.some((b) => b.name.includes("dk-mode-banner")),
+          false,
+          "mode-banner must be hidden on desktop fine pointer > 640px",
+        );
+        assert.equal(check.bannerRect.width, 0);
+        assert.equal(check.taFont, 12);
+      }
+    } finally {
+      await context.close();
+    }
+  }
+
+  // Narrow (<640px) PiP dock parity: .dk-dock.dk-pip-dock stays static, not fixed-bottom mobile dock
+  const pipContext = await browser.newContext({
+    viewport: { width: 480, height: 120 },
+  });
+  const pipPage = await pipContext.newPage();
+  try {
+    await pipPage.addInitScript(() => {
+      const origAttachShadow = Element.prototype.attachShadow;
+      Element.prototype.attachShadow = function (init) {
+        const sr = origAttachShadow.call(this, init);
+        if (this.tagName?.toLowerCase() === "design-kit-annotator") {
+          window.__testShadowRoot = sr;
+        }
+        return sr;
+      };
+    });
+    await pipPage.goto(`${appServer.url}/orders`);
+    const pipStyle = await pipPage.evaluate(() => {
+      window.__designKitAnnotate.mountAnnotator({
+        initialMode: "annotate",
+        storageKey: false,
+      });
+      const sr = window.__testShadowRoot;
+      const dock = sr.querySelector(".dk-dock");
+      dock.classList.add("dk-pip-dock");
+      const dockCs = getComputedStyle(dock);
+      const barCs = getComputedStyle(sr.querySelector(".dk-bar"));
+      const handleCs = getComputedStyle(sr.querySelector(".dk-drag-handle"));
+      return {
+        dockPosition: dockCs.position,
+        barFlexDirection: barCs.flexDirection,
+        handleDisplay: handleCs.display,
+      };
+    });
+    assert.equal(pipStyle.dockPosition, "static");
+    assert.equal(pipStyle.barFlexDirection, "row");
+    assert.notEqual(pipStyle.handleDisplay, "none");
+  } finally {
+    await pipContext.close();
   }
 });

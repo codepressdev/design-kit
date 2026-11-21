@@ -107,11 +107,58 @@ const OVERLAY_CSS = `
   pointer-events: auto;
   cursor: crosshair;
   touch-action: none;
+  box-shadow: inset 0 0 0 3px rgba(239, 68, 68, 0.85);
   z-index: 1;
+}
+.dk-capture[data-tool="pin"] {
+  touch-action: pan-y;
 }
 .dk-capture[hidden] {
   display: none;
   pointer-events: none;
+}
+.dk-mode-banner {
+  display: none;
+  position: fixed;
+  top: max(8px, env(safe-area-inset-top));
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: calc(100vw - 16px);
+  min-height: 36px;
+  padding: 6px 14px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border-radius: 999px;
+  background: rgba(24, 24, 27, 0.96);
+  border: 1.5px solid #ef4444;
+  color: #fafafa;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.2;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+  pointer-events: auto;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  user-select: none;
+  z-index: 6;
+}
+.dk-mode-banner[hidden] {
+  display: none !important;
+}
+.dk-mode-banner-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #ef4444;
+  flex-shrink: 0;
+}
+.dk-mode-banner-sub {
+  color: #fca5a5;
+  font-weight: 500;
 }
 .dk-svg-layer {
   position: fixed;
@@ -177,7 +224,12 @@ const OVERLAY_CSS = `
 .dk-bar.dk-dragging {
   cursor: grabbing;
 }
+.dk-bar-primary,
+.dk-bar-secondary {
+  display: contents;
+}
 .dk-drag-handle {
+  order: 1;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -191,6 +243,33 @@ const OVERLAY_CSS = `
   font-size: 13px;
   letter-spacing: -1px;
   line-height: 1;
+}
+.dk-seg {
+  order: 2;
+}
+.dk-tools {
+  order: 3;
+}
+.dk-btn-undo {
+  order: 4;
+}
+.dk-btn-redo {
+  order: 5;
+}
+.dk-count {
+  order: 6;
+}
+.dk-btn-copy {
+  order: 7;
+}
+.dk-btn-send {
+  order: 8;
+}
+.dk-btn-popout {
+  order: 9;
+}
+.dk-btn-collapse {
+  order: 10;
 }
 .dk-drag-handle:hover {
   color: #e4e4e7;
@@ -396,7 +475,7 @@ const OVERLAY_CSS = `
   display: flex;
   flex-direction: column;
   gap: 8px;
-  z-index: 6;
+  z-index: 7;
 }
 .dk-popover[hidden] {
   display: none;
@@ -405,11 +484,19 @@ const OVERLAY_CSS = `
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
   font-size: 11px;
   color: #a1a1aa;
   cursor: grab;
   user-select: none;
   touch-action: none;
+}
+.dk-popover-head span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
 }
 .dk-popover-head:active {
   cursor: grabbing;
@@ -433,6 +520,7 @@ const OVERLAY_CSS = `
 }
 .dk-launcher {
   pointer-events: auto;
+  align-self: flex-end;
   padding: 6px 10px;
   border-radius: 999px;
   background: #18181b;
@@ -445,6 +533,130 @@ const OVERLAY_CSS = `
 }
 .dk-launcher[hidden] {
   display: none;
+}
+@media (max-width: 640px), (pointer: coarse) {
+  .dk-mode-banner {
+    display: inline-flex;
+  }
+  .dk-marker {
+    width: 28px;
+    height: 28px;
+    font-size: 12px;
+  }
+}
+@media (max-width: 767px), (pointer: coarse) {
+  .dk-popover textarea {
+    font-size: 16px;
+    line-height: 1.4;
+    padding: 8px 10px;
+  }
+}
+@media (max-width: 640px) {
+  .dk-dock:not(.dk-pip-dock) {
+    left: 8px;
+    right: 8px;
+    bottom: max(8px, env(safe-area-inset-bottom));
+    max-width: none;
+    align-items: stretch;
+  }
+  .dk-dock:not(.dk-pip-dock) .dk-bar {
+    flex-direction: column;
+    flex-wrap: nowrap;
+    align-items: stretch;
+    gap: 6px;
+    padding: 8px;
+    max-width: 100%;
+    width: 100%;
+    border-radius: 14px;
+  }
+  .dk-dock:not(.dk-pip-dock) .dk-drag-handle {
+    display: none;
+  }
+  .dk-dock:not(.dk-pip-dock) .dk-bar-primary {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+  }
+  .dk-dock:not(.dk-pip-dock) .dk-bar-primary > * {
+    order: 0;
+  }
+  .dk-dock:not(.dk-pip-dock) .dk-bar-primary .dk-btn {
+    min-height: 36px;
+    padding: 6px 10px;
+    border-radius: 7px;
+    flex-shrink: 0;
+  }
+  .dk-dock:not(.dk-pip-dock) .dk-bar-primary .dk-btn-send {
+    margin-left: auto;
+  }
+  .dk-dock:not(.dk-pip-dock) .dk-count-unit {
+    display: none;
+  }
+  .dk-dock:not(.dk-pip-dock) .dk-bar-secondary {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+    padding-top: 6px;
+    border-top: 1px solid #27272a;
+    min-width: 0;
+  }
+  .dk-dock:not(.dk-pip-dock) .dk-bar-secondary::-webkit-scrollbar {
+    display: none;
+  }
+  .dk-dock:not(.dk-pip-dock) .dk-bar-secondary > * {
+    order: 0;
+    flex-shrink: 0;
+  }
+  .dk-dock:not(.dk-pip-dock) .dk-bar-secondary .dk-tools {
+    flex-wrap: nowrap;
+    gap: 4px;
+  }
+  .dk-dock:not(.dk-pip-dock) .dk-bar-secondary .dk-btn {
+    min-height: 32px;
+    padding: 5px 9px;
+    border-radius: 7px;
+    flex-shrink: 0;
+  }
+  .dk-dock:not(.dk-pip-dock) .dk-bar[data-mode="browse"] .dk-bar-secondary {
+    display: none;
+  }
+  .dk-dock:not(.dk-pip-dock) .dk-chips {
+    justify-content: flex-start;
+    max-width: 100%;
+  }
+  .dk-dock:not(.dk-pip-dock) .dk-toast {
+    max-width: 100%;
+  }
+  .dk-popover {
+    padding: 12px;
+    border-radius: 12px;
+    border-color: #52525b;
+    gap: 10px;
+  }
+  .dk-popover-head {
+    font-size: 12px;
+    cursor: default;
+  }
+  .dk-popover-actions .dk-btn {
+    min-height: 36px;
+    padding: 6px 12px;
+  }
+}
+@media (max-width: 360px) {
+  .dk-dock:not(.dk-pip-dock) .dk-bar {
+    padding: 6px;
+  }
+  .dk-dock:not(.dk-pip-dock) .dk-bar-primary {
+    gap: 4px;
+  }
+  .dk-dock:not(.dk-pip-dock) .dk-bar-primary .dk-btn {
+    padding: 6px 7px;
+  }
 }
 `;
 
@@ -496,6 +708,25 @@ function currentViewport(win, doc) {
       Math.round(win?.innerHeight || doc?.documentElement?.clientHeight || 800),
     ),
     dpr: Number(win?.devicePixelRatio) || 1,
+  };
+}
+
+function currentVisualViewport(win, doc) {
+  const fallback = currentViewport(win, doc);
+  const vv = win?.visualViewport;
+  if (!vv || typeof vv.width !== "number" || typeof vv.height !== "number") {
+    return {
+      width: fallback.width,
+      height: fallback.height,
+      offsetLeft: 0,
+      offsetTop: 0,
+    };
+  }
+  return {
+    width: Math.max(1, Math.round(vv.width)),
+    height: Math.max(1, Math.round(vv.height)),
+    offsetLeft: Number.isFinite(vv.offsetLeft) ? vv.offsetLeft : 0,
+    offsetTop: Number.isFinite(vv.offsetTop) ? vv.offsetTop : 0,
   };
 }
 
@@ -690,6 +921,22 @@ export function mountAnnotator(options = {}) {
   captureLayer.hidden = true;
   root.appendChild(captureLayer);
 
+  const modeBanner = doc.createElement("button");
+  modeBanner.type = "button";
+  modeBanner.className = "dk-mode-banner";
+  modeBanner.setAttribute("aria-label", "Switch to Browse mode");
+  modeBanner.hidden = true;
+  const modeBannerDot = doc.createElement("span");
+  modeBannerDot.className = "dk-mode-banner-dot";
+  modeBannerDot.setAttribute("aria-hidden", "true");
+  const modeBannerText = doc.createElement("span");
+  modeBannerText.textContent = "Annotating";
+  const modeBannerSub = doc.createElement("span");
+  modeBannerSub.className = "dk-mode-banner-sub";
+  modeBannerSub.textContent = "· Tap to Browse";
+  modeBanner.append(modeBannerDot, modeBannerText, modeBannerSub);
+  root.appendChild(modeBanner);
+
   const svgNs = "http://www.w3.org/2000/svg";
   const svgLayer = doc.createElementNS(svgNs, "svg");
   svgLayer.setAttribute("class", "dk-svg-layer");
@@ -818,7 +1065,7 @@ export function mountAnnotator(options = {}) {
   const shortcutMod = applePlatform ? "⌘" : "Ctrl+";
   const btnUndo = doc.createElement("button");
   btnUndo.type = "button";
-  btnUndo.className = "dk-btn";
+  btnUndo.className = "dk-btn dk-btn-undo";
   btnUndo.textContent = "Undo";
   btnUndo.title = `Undo (${shortcutMod}Z)`;
   btnUndo.setAttribute("aria-label", "Undo");
@@ -826,7 +1073,7 @@ export function mountAnnotator(options = {}) {
 
   const btnRedo = doc.createElement("button");
   btnRedo.type = "button";
-  btnRedo.className = "dk-btn";
+  btnRedo.className = "dk-btn dk-btn-redo";
   btnRedo.textContent = "Redo";
   btnRedo.title = applePlatform ? "Redo (⇧⌘Z)" : "Redo (Ctrl+Shift+Z)";
   btnRedo.setAttribute("aria-label", "Redo");
@@ -834,10 +1081,15 @@ export function mountAnnotator(options = {}) {
 
   const countBadge = doc.createElement("span");
   countBadge.className = "dk-count";
+  const countNum = doc.createElement("span");
+  countNum.className = "dk-count-num";
+  const countUnit = doc.createElement("span");
+  countUnit.className = "dk-count-unit";
+  countBadge.append(countNum, countUnit);
 
   const btnCopy = doc.createElement("button");
   btnCopy.type = "button";
-  btnCopy.className = "dk-btn dk-btn-subtle";
+  btnCopy.className = "dk-btn dk-btn-subtle dk-btn-copy";
   btnCopy.textContent = "Copy";
   btnCopy.title = "Copy redline packet";
 
@@ -851,7 +1103,7 @@ export function mountAnnotator(options = {}) {
   const hasHostPopOut = typeof options.onPopOut === "function";
   const btnPopOut = doc.createElement("button");
   btnPopOut.type = "button";
-  btnPopOut.className = "dk-btn";
+  btnPopOut.className = "dk-btn dk-btn-popout";
   btnPopOut.textContent = "↗";
   btnPopOut.title = "Pop out toolbar outside app window";
   btnPopOut.setAttribute("aria-label", "Pop out toolbar");
@@ -859,22 +1111,26 @@ export function mountAnnotator(options = {}) {
 
   const btnCollapse = doc.createElement("button");
   btnCollapse.type = "button";
-  btnCollapse.className = "dk-btn";
+  btnCollapse.className = "dk-btn dk-btn-collapse";
   btnCollapse.textContent = "×";
   btnCollapse.setAttribute("aria-label", "Collapse annotator");
 
-  bar.append(
+  const barPrimary = doc.createElement("div");
+  barPrimary.className = "dk-bar-primary";
+  barPrimary.append(
     dragHandle,
     modeSeg,
-    toolsWrap,
-    btnUndo,
-    btnRedo,
     countBadge,
-    btnCopy,
     btnSend,
     btnPopOut,
     btnCollapse,
   );
+
+  const barSecondary = doc.createElement("div");
+  barSecondary.className = "dk-bar-secondary";
+  barSecondary.append(toolsWrap, btnUndo, btnRedo, btnCopy);
+
+  bar.append(barPrimary, barSecondary);
 
   const launcher = doc.createElement("button");
   launcher.type = "button";
@@ -885,6 +1141,7 @@ export function mountAnnotator(options = {}) {
 
   // Control map for coordinate queries (without exposing closed shadowRoot)
   const controls = {
+    "mode-banner": modeBanner,
     "mode-browse": btnBrowse,
     "mode-annotate": btnAnnotate,
     "tool-pin": toolButtons.pin,
@@ -984,9 +1241,36 @@ export function mountAnnotator(options = {}) {
     return true;
   }
 
+  let lastPopoverAnchor = { x: 16, y: 16 };
+
   function clampPopover(anchorX, anchorY) {
     const vp = currentViewport(win, doc);
     const pad = 8;
+    if (vp.width <= 640) {
+      const vv = currentVisualViewport(win, doc);
+      const sheetWidth = Math.max(120, Math.min(vp.width, vv.width) - pad * 2);
+      popover.style.width = `${sheetWidth}px`;
+      popover.style.maxWidth = `${sheetWidth}px`;
+      popover.style.left = `${Math.round(vv.offsetLeft + pad)}px`;
+      popover.style.top = `${Math.round(vv.offsetTop + pad)}px`;
+      const rect = popover.getBoundingClientRect();
+      const h = rect.height || 160;
+      let bottomLimit = vv.offsetTop + vv.height;
+      if (!bar.hidden && !dockHidden && !pipWindow) {
+        const barRect = bar.getBoundingClientRect();
+        if (
+          barRect.height > 0 &&
+          barRect.top > vv.offsetTop + pad &&
+          barRect.top < bottomLimit
+        ) {
+          bottomLimit = barRect.top;
+        }
+      }
+      const top = Math.max(vv.offsetTop + pad, bottomLimit - h - pad);
+      popover.style.top = `${Math.round(top)}px`;
+      return;
+    }
+    popover.style.width = "";
     const maxW = Math.max(120, vp.width - pad * 2);
     popover.style.maxWidth = `${maxW}px`;
     popover.style.left = `${pad}px`;
@@ -1002,11 +1286,16 @@ export function mountAnnotator(options = {}) {
 
   function openPopoverForItem(item, anchorX, anchorY) {
     activePopoverItemId = item.id;
+    lastPopoverAnchor = { x: anchorX, y: anchorY };
     popTitle.textContent = `#${item.index} · ${item.kind} · ${item.route}`;
     popInput.value = item.note || "";
     popover.hidden = false;
     clampPopover(anchorX, anchorY);
-    popInput.focus();
+    try {
+      popInput.focus({ preventScroll: true });
+    } catch {
+      popInput.focus();
+    }
   }
 
   function closePopover() {
@@ -1271,6 +1560,16 @@ export function mountAnnotator(options = {}) {
     }
   }
 
+  function isCoarseOrNarrowViewport() {
+    const vp = currentViewport(win, doc);
+    if (vp.width <= 640) return true;
+    try {
+      return Boolean(win.matchMedia?.("(pointer: coarse)")?.matches);
+    } catch {
+      return false;
+    }
+  }
+
   function renderMarkers() {
     while (markersLayer.firstChild)
       markersLayer.removeChild(markersLayer.firstChild);
@@ -1278,7 +1577,9 @@ export function mountAnnotator(options = {}) {
 
     const routeNow = currentRoute(win);
     const vp = currentViewport(win, doc);
-    const pad = 12;
+    const markerSize = isCoarseOrNarrowViewport() ? 28 : 22;
+    const half = markerSize / 2;
+    const pad = half;
 
     for (const item of items) {
       if (item.route !== routeNow) continue;
@@ -1305,8 +1606,8 @@ export function mountAnnotator(options = {}) {
       btn.type = "button";
       btn.className = "dk-marker";
       btn.textContent = String(item.index);
-      btn.style.left = `${Math.round(cx - 11)}px`;
-      btn.style.top = `${Math.round(cy - 11)}px`;
+      btn.style.left = `${Math.round(cx - half)}px`;
+      btn.style.top = `${Math.round(cy - half)}px`;
       btn.title = item.note || `#${item.index} (${item.kind})`;
       btn.addEventListener("click", (e) => {
         e.stopPropagation();
@@ -1319,9 +1620,13 @@ export function mountAnnotator(options = {}) {
   function render() {
     if (destroyed) return;
 
+    const annotateActive = open && mode === "annotate";
     bar.hidden = !open;
+    bar.setAttribute("data-mode", mode);
     launcher.hidden = open || options.showLauncher === false;
-    captureLayer.hidden = !(open && mode === "annotate");
+    captureLayer.hidden = !annotateActive;
+    captureLayer.setAttribute("data-tool", tool);
+    modeBanner.hidden = !annotateActive;
 
     btnBrowse.setAttribute("aria-selected", String(mode === "browse"));
     btnAnnotate.setAttribute("aria-selected", String(mode === "annotate"));
@@ -1332,7 +1637,8 @@ export function mountAnnotator(options = {}) {
     }
 
     const n = items.length;
-    countBadge.textContent = n === 1 ? "1 redline" : `${n} redlines`;
+    countNum.textContent = String(n);
+    countUnit.textContent = n === 1 ? " redline" : " redlines";
     btnSend.disabled = sending || n === 0;
     btnCopy.disabled = n === 0;
     btnSend.textContent = sending ? "Sending…" : "Send to Fix";
@@ -1447,7 +1753,10 @@ export function mountAnnotator(options = {}) {
   captureLayer.addEventListener("pointerdown", (e) => {
     if (mode !== "annotate" || !open) return;
     if (e.button !== 0 && e.pointerType === "mouse") return;
-    e.preventDefault();
+    const isTouchPin = e.pointerType === "touch" && tool === "pin";
+    if (!isTouchPin) {
+      e.preventDefault();
+    }
     e.stopPropagation();
 
     const x = Math.round(e.clientX);
@@ -1456,6 +1765,7 @@ export function mountAnnotator(options = {}) {
 
     draft = {
       kind: tool,
+      pointerType: e.pointerType,
       startX: x,
       startY: y,
       curX: x,
@@ -1464,17 +1774,21 @@ export function mountAnnotator(options = {}) {
       points: [{ x, y }],
     };
 
-    try {
-      captureLayer.setPointerCapture?.(e.pointerId);
-    } catch {
-      // ignore synthetic events without active pointerId
+    if (!isTouchPin) {
+      try {
+        captureLayer.setPointerCapture?.(e.pointerId);
+      } catch {
+        // ignore synthetic events without active pointerId
+      }
     }
     renderDraftPreview(draft);
   });
 
   captureLayer.addEventListener("pointermove", (e) => {
     if (!draft) return;
-    e.preventDefault();
+    if (!(draft.kind === "pin" && e.pointerType === "touch")) {
+      e.preventDefault();
+    }
     const x = Math.round(e.clientX);
     const y = Math.round(e.clientY);
     draft.curX = x;
@@ -1690,12 +2004,23 @@ export function mountAnnotator(options = {}) {
 
   captureLayer.addEventListener("pointerup", (e) => {
     if (!draft) return;
-    e.preventDefault();
-    e.stopPropagation();
     const completed = draft;
     completed.curX = Math.round(e.clientX);
     completed.curY = Math.round(e.clientY);
     draft = null;
+    if (
+      completed.kind === "pin" &&
+      (e.pointerType === "touch" || completed.pointerType === "touch") &&
+      Math.hypot(
+        completed.curX - completed.startX,
+        completed.curY - completed.startY,
+      ) > 12
+    ) {
+      clearDraftSvg();
+      return;
+    }
+    e.preventDefault();
+    e.stopPropagation();
     void finalizeDraft(completed);
   });
 
@@ -1827,7 +2152,7 @@ export function mountAnnotator(options = {}) {
   // Drag handler for .dk-bar (grip handle or any non-button area)
   let dockDrag = null;
   bar.addEventListener("pointerdown", (e) => {
-    if (pipWindow) return;
+    if (pipWindow || currentViewport(win, doc).width <= 640) return;
     if (e.button !== 0 && e.pointerType === "mouse") return;
     const target = e.target;
     if (
@@ -1908,6 +2233,7 @@ export function mountAnnotator(options = {}) {
   // Drag handler for .dk-popover via its header
   let popDrag = null;
   popHead.addEventListener("pointerdown", (e) => {
+    if (currentViewport(win, doc).width <= 640) return;
     if (e.button !== 0 && e.pointerType === "mouse") return;
     const target = e.target;
     if (
@@ -1991,6 +2317,7 @@ export function mountAnnotator(options = {}) {
   }
 
   // Button handlers
+  modeBanner.addEventListener("click", () => setMode("browse"));
   btnBrowse.addEventListener("click", () => setMode("browse"));
   btnAnnotate.addEventListener("click", () => setMode("annotate"));
   btnPopOut.addEventListener("click", (e) => {
@@ -2024,13 +2351,24 @@ export function mountAnnotator(options = {}) {
       applyDockPosition(dockPos, false);
     }
     if (!popover.hidden && activePopoverItemId) {
-      const vp = currentViewport(win, doc);
-      clampPopover(vp.width, vp.height);
+      clampPopover(lastPopoverAnchor.x, lastPopoverAnchor.y);
+    }
+  };
+  const onVisualViewportChange = () => {
+    if (destroyed) return;
+    if (!popover.hidden && activePopoverItemId) {
+      clampPopover(lastPopoverAnchor.x, lastPopoverAnchor.y);
     }
   };
   win.addEventListener("popstate", onRouteOrResize);
   win.addEventListener("hashchange", onRouteOrResize);
   win.addEventListener("resize", onRouteOrResize);
+  win.visualViewport?.addEventListener("resize", onVisualViewportChange, {
+    passive: true,
+  });
+  win.visualViewport?.addEventListener("scroll", onVisualViewportChange, {
+    passive: true,
+  });
 
   // Optional parent postMessage bridge for mode control when running in an iframe
   let controlBridge = null;
@@ -2174,6 +2512,7 @@ export function mountAnnotator(options = {}) {
   function getUiBounds() {
     const out = [];
     const nodes = [
+      modeBanner,
       bar,
       chipsWrap,
       toast,
@@ -2221,6 +2560,8 @@ export function mountAnnotator(options = {}) {
     win.removeEventListener("popstate", onRouteOrResize);
     win.removeEventListener("hashchange", onRouteOrResize);
     win.removeEventListener("resize", onRouteOrResize);
+    win.visualViewport?.removeEventListener("resize", onVisualViewportChange);
+    win.visualViewport?.removeEventListener("scroll", onVisualViewportChange);
     host.remove();
   }
 
