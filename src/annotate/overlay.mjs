@@ -28,6 +28,60 @@ import {
 
 const HOST_TAG = "design-kit-annotator";
 const DEFAULT_STORAGE_KEY = "design-kit:annotate:queue:v1";
+const MAX_HISTORY_STEPS = 100;
+
+// Focus targets whose own Cmd/Ctrl+Z (text undo, terminal or editor keys) the
+// overlay's undo shortcut must never take over.
+const NATIVE_UNDO_TARGET_SELECTOR = [
+  ".xterm",
+  ".xterm-helper-textarea",
+  ".monaco-editor",
+  ".cm-editor",
+  "input",
+  "textarea",
+  "select",
+  "[contenteditable='true']",
+  "[contenteditable='']",
+  "[role='textbox']",
+].join(", ");
+
+function isNativeUndoTarget(target) {
+  if (!target || typeof target !== "object") return false;
+  if (target.isContentEditable) return true;
+  const tag =
+    typeof target.tagName === "string" ? target.tagName.toUpperCase() : "";
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
+  if (typeof target.closest === "function") {
+    try {
+      if (target.closest(NATIVE_UNDO_TARGET_SELECTOR)) return true;
+    } catch {
+      // ignore selector errors in non-standard DOM shims
+    }
+  }
+  return false;
+}
+
+function isApplePlatform(win) {
+  const nav = win?.navigator;
+  const platform = String(nav?.userAgentData?.platform || nav?.platform || "");
+  if (/mac|iphone|ipad|ipod/i.test(platform)) return true;
+  return /Mac OS X|iPhone|iPad/.test(String(nav?.userAgent || ""));
+}
+
+/**
+ * Classify a keydown as the overlay's undo/redo shortcut: Cmd/Ctrl+Z undoes;
+ * Cmd/Ctrl+Shift+Z and Ctrl+Y redo. Returns null for anything else.
+ */
+function historyShortcutOf(event) {
+  if (!event || event.altKey || event.isComposing) return null;
+  const meta = Boolean(event.metaKey);
+  const ctrl = Boolean(event.ctrlKey);
+  if (meta === ctrl) return null;
+  const key = String(event.key || "").toLowerCase();
+  if (key === "z") return event.shiftKey ? "redo" : "undo";
+  if (key === "y" && ctrl && !event.shiftKey) return "redo";
+  return null;
+}
 
 const OVERLAY_CSS = `
 :host {
@@ -191,6 +245,12 @@ const OVERLAY_CSS = `
 .dk-btn:hover {
   background: #27272a;
   color: #ffffff;
+}
+.dk-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  background: transparent;
+  color: #d4d4d8;
 }
 .dk-btn[aria-pressed="true"],
 .dk-btn[aria-selected="true"] {
@@ -569,6 +629,14 @@ export function mountAnnotator(options = {}) {
   let activePopoverItemId = null;
   let items = [];
   let destroyed = false;
+  // In-memory undo/redo history of queue snapshots. Each entry is the
+  // `items` array as it was before (undo) or after (redo) a user change;
+  // item objects are never mutated in place, so a shallow copy is enough.
+  let undoStack = [];
+  let redoStack = [];
+  // Shape being drawn (pointer down, not yet released) in Annotate mode.
+  let draft = null;
+  const applePlatform = isApplePlatform(win);
 
   // Restore persisted queue from sessionStorage
   if (storageKey) {
@@ -691,6 +759,11 @@ export function mountAnnotator(options = {}) {
   toastDismiss.setAttribute("aria-label", "Dismiss status");
   toast.append(toastText, toastLink, toastDismiss);
   dock.appendChild(toast);
+  toastLink.addEventListener("click", (event) => {
+    if (!toastLink.href) return;
+    event.preventDefault();
+    openRun();
+  });
 
   const chipsWrap = doc.createElement("div");
   chipsWrap.className = "dk-chips";
@@ -742,6 +815,23 @@ export function mountAnnotator(options = {}) {
     toolsWrap.appendChild(b);
   }
 
+  const shortcutMod = applePlatform ? "⌘" : "Ctrl+";
+  const btnUndo = doc.createElement("button");
+  btnUndo.type = "button";
+  btnUndo.className = "dk-btn";
+  btnUndo.textContent = "Undo";
+  btnUndo.title = `Undo (${shortcutMod}Z)`;
+  btnUndo.setAttribute("aria-label", "Undo");
+  btnUndo.disabled = true;
+
+  const btnRedo = doc.createElement("button");
+  btnRedo.type = "button";
+  btnRedo.className = "dk-btn";
+  btnRedo.textContent = "Redo";
+  btnRedo.title = applePlatform ? "Redo (⇧⌘Z)" : "Redo (Ctrl+Shift+Z)";
+  btnRedo.setAttribute("aria-label", "Redo");
+  btnRedo.disabled = true;
+
   const countBadge = doc.createElement("span");
   countBadge.className = "dk-count";
 
@@ -777,6 +867,8 @@ export function mountAnnotator(options = {}) {
     dragHandle,
     modeSeg,
     toolsWrap,
+    btnUndo,
+    btnRedo,
     countBadge,
     btnCopy,
     btnSend,
@@ -800,6 +892,8 @@ export function mountAnnotator(options = {}) {
     "tool-arrow": toolButtons.arrow,
     "tool-freehand": toolButtons.freehand,
     "send-fix": btnSend,
+    undo: btnUndo,
+    redo: btnRedo,
     "copy-packet": btnCopy,
     "pop-out": btnPopOut,
     "drag-handle": dragHandle,
@@ -821,7 +915,7 @@ export function mountAnnotator(options = {}) {
           ? "dk-toast dk-toast-err"
           : "dk-toast";
     toastText.textContent = message;
-    const safeUrl = sanitizeRunUrl(runUrl);
+    const safeUrl = resolveRunUrl(runUrl);
     if (safeUrl) {
       toastLink.href = safeUrl;
       toastLink.textContent = "Open run ↗";
@@ -835,6 +929,59 @@ export function mountAnnotator(options = {}) {
 
   function hideToast() {
     toast.hidden = true;
+  }
+
+  /**
+   * Resolve a run URL to an absolute http(s) URL. A relative path resolves
+   * against `options.runUrlBase` or the host page's own address — never the
+   * document the toast happens to sit in (a popped-out toolbar's document is
+   * `about:blank`). Unsafe schemes resolve to undefined.
+   */
+  function resolveRunUrl(rawUrl) {
+    const safe = sanitizeRunUrl(rawUrl);
+    if (!safe) return undefined;
+    try {
+      const base =
+        typeof options.runUrlBase === "string" && options.runUrlBase
+          ? options.runUrlBase
+          : win.location.href;
+      const resolved = new URL(safe, base);
+      if (resolved.protocol === "http:" || resolved.protocol === "https:") {
+        return resolved.href;
+      }
+    } catch {
+      // fall through
+    }
+    return undefined;
+  }
+
+  /** The toast's absolute run URL, or "" when no run link is showing. */
+  function currentRunUrl() {
+    return toast.hidden || toastLink.hidden ? "" : toastLink.href || "";
+  }
+
+  /**
+   * Open the run the toast links to: through the host's `onOpenRun` when
+   * given, otherwise in a new tab opened from the host page's window (so a
+   * popped-out toolbar never navigates its own `about:blank` window).
+   */
+  function openRun() {
+    const url = currentRunUrl();
+    if (!url) return false;
+    if (typeof options.onOpenRun === "function") {
+      try {
+        options.onOpenRun(url);
+      } catch {
+        // host handler errors must not break the overlay
+      }
+      return true;
+    }
+    try {
+      win.open(url, "_blank", "noopener,noreferrer");
+    } catch {
+      // popup blocked or unavailable
+    }
+    return true;
   }
 
   function clampPopover(anchorX, anchorY) {
@@ -864,19 +1011,98 @@ export function mountAnnotator(options = {}) {
 
   function closePopover() {
     activePopoverItemId = null;
+    // Drop focus from the note so a hidden textarea never keeps swallowing
+    // keys (the undo shortcut leaves focused text fields alone).
+    const focused = shadow.activeElement;
+    if (focused && popover.contains(focused)) focused.blur?.();
     popover.hidden = true;
   }
 
   function saveActiveNote() {
     if (!activePopoverItemId) return;
-    const item = items.find((i) => i.id === activePopoverItemId);
-    if (item) {
-      item.note = popInput.value.trim();
-      persistQueue();
-      render();
-      options.onItemsChange?.(items.slice());
+    const idx = items.findIndex((i) => i.id === activePopoverItemId);
+    if (idx !== -1) {
+      const item = items[idx];
+      const nextNote = popInput.value.trim();
+      if ((item.note || "") !== nextNote) {
+        recordHistory(`edited note #${item.index}`);
+        // Replace the item object so history snapshots keep the old note.
+        items = items.slice();
+        items[idx] = { ...item, note: nextNote };
+        persistQueue();
+        render();
+        options.onItemsChange?.(items.slice());
+      }
     }
     closePopover();
+  }
+
+  function describeItem(item) {
+    const kind =
+      item.kind === "box"
+        ? "region"
+        : item.kind === "arrow"
+          ? "arrow"
+          : item.kind === "freehand"
+            ? "drawing"
+            : "pin";
+    return `${kind} #${item.index}`;
+  }
+
+  /** Save the queue as it is now, before a user change, as one undo step. */
+  function recordHistory(label) {
+    undoStack.push({ items: items.slice(), label });
+    if (undoStack.length > MAX_HISTORY_STEPS) {
+      undoStack.splice(0, undoStack.length - MAX_HISTORY_STEPS);
+    }
+    redoStack = [];
+  }
+
+  function resetHistory() {
+    undoStack = [];
+    redoStack = [];
+  }
+
+  function applyHistorySnapshot(snapshotItems) {
+    items = snapshotItems.map((it, idx) =>
+      it.index === idx + 1 ? it : { ...it, index: idx + 1 },
+    );
+    if (
+      activePopoverItemId &&
+      !items.some((it) => it.id === activePopoverItemId)
+    ) {
+      closePopover();
+    }
+    persistQueue();
+    render();
+    options.onItemsChange?.(items.slice());
+  }
+
+  function undo() {
+    if (draft) {
+      draft = null;
+      clearDraftSvg();
+      return true;
+    }
+    const entry = undoStack.pop();
+    if (!entry) return false;
+    if (!popover.hidden) closePopover();
+    redoStack.push({ items: items.slice(), label: entry.label });
+    applyHistorySnapshot(entry.items);
+    showToast("pending", `Undid: ${entry.label}`);
+    render();
+    return true;
+  }
+
+  function redo() {
+    const entry = redoStack.pop();
+    if (!entry) return false;
+    if (!popover.hidden) closePopover();
+    undoStack.push({ items: items.slice(), label: entry.label });
+    applyHistorySnapshot(entry.items);
+    showToast("pending", `Redid: ${entry.label}`);
+    render();
+    return true;
   }
 
   // Hit-test underlying page element ignoring the annotator host
@@ -1110,6 +1336,8 @@ export function mountAnnotator(options = {}) {
     btnSend.disabled = sending || n === 0;
     btnCopy.disabled = n === 0;
     btnSend.textContent = sending ? "Sending…" : "Send to Fix";
+    btnUndo.disabled = sending || undoStack.length === 0;
+    btnRedo.disabled = sending || redoStack.length === 0;
 
     // Render chip tray
     while (chipsWrap.firstChild) chipsWrap.removeChild(chipsWrap.firstChild);
@@ -1157,6 +1385,35 @@ export function mountAnnotator(options = {}) {
     }
   }
 
+  // Undo/redo shortcut: attached while the overlay is open (either mode) on
+  // the host document, and on the popped-out toolbar's document.
+  function handleHistoryKeydown(event) {
+    if (event.defaultPrevented || sending) return;
+    const action = historyShortcutOf(event);
+    if (!action) return;
+    const path =
+      typeof event.composedPath === "function" ? event.composedPath() : [];
+    const target = path[0] || event.target;
+    if (isNativeUndoTarget(target)) return;
+    const ownerDoc = target?.ownerDocument || doc;
+    if (isNativeUndoTarget(ownerDoc.activeElement)) return;
+    const shadowFocus = shadow.activeElement;
+    if (
+      shadowFocus &&
+      (isNativeUndoTarget(shadowFocus) ||
+        (!popover.hidden && popover.contains(shadowFocus)))
+    ) {
+      return;
+    }
+    const handled = action === "undo" ? undo() : redo();
+    if (handled) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+  }
+
+  let historyKeydownAttached = false;
+  let pipKeydownDoc = null;
   function syncListeners() {
     const shouldAttach = open && mode === "annotate" && !destroyed;
     if (shouldAttach && !keydownAttached) {
@@ -1166,10 +1423,26 @@ export function mountAnnotator(options = {}) {
       doc.removeEventListener("keydown", handleAnnotateKeydown, true);
       keydownAttached = false;
     }
+    const shouldAttachHistory = open && !destroyed;
+    if (shouldAttachHistory && !historyKeydownAttached) {
+      doc.addEventListener("keydown", handleHistoryKeydown, true);
+      historyKeydownAttached = true;
+    } else if (!shouldAttachHistory && historyKeydownAttached) {
+      doc.removeEventListener("keydown", handleHistoryKeydown, true);
+      historyKeydownAttached = false;
+    }
+    const nextPipDoc =
+      shouldAttachHistory && pipWindow && !pipWindow.closed
+        ? pipWindow.document
+        : null;
+    if (pipKeydownDoc !== nextPipDoc) {
+      pipKeydownDoc?.removeEventListener("keydown", handleHistoryKeydown, true);
+      nextPipDoc?.addEventListener("keydown", handleHistoryKeydown, true);
+      pipKeydownDoc = nextPipDoc;
+    }
   }
 
   // Pointer interaction on captureLayer (only active when mode === "annotate")
-  let draft = null;
 
   captureLayer.addEventListener("pointerdown", (e) => {
     if (mode !== "annotate" || !open) return;
@@ -1406,7 +1679,9 @@ export function mountAnnotator(options = {}) {
       item.snapshot = snapshot;
     }
 
-    items.push(item);
+    if (destroyed) return;
+    recordHistory(`added ${describeItem(item)}`);
+    items = [...items, item];
     persistQueue();
     render();
     options.onItemsChange?.(items.slice());
@@ -1490,6 +1765,7 @@ export function mountAnnotator(options = {}) {
     if (!pipWindow) return;
     const oldPip = pipWindow;
     pipWindow = null;
+    syncListeners();
     dock.classList.remove("dk-pip-dock");
     btnPopOut.textContent = "↗";
     btnPopOut.title = "Pop out toolbar outside app window";
@@ -1542,6 +1818,7 @@ export function mountAnnotator(options = {}) {
       pip.addEventListener("pagehide", () => {
         if (pipWindow === pip) dockBackFromPip();
       });
+      syncListeners();
     } catch {
       // User cancelled or PiP unavailable; stay docked
     }
@@ -1700,6 +1977,9 @@ export function mountAnnotator(options = {}) {
       toastText: toast.hidden
         ? ""
         : `${toastText.textContent || ""} ${toastLink.hidden ? "" : toastLink.textContent || ""}`.trim(),
+      toastUrl: currentRunUrl(),
+      canUndo: undoStack.length > 0,
+      canRedo: redoStack.length > 0,
       toastKind: toast.classList.contains("dk-toast-err")
         ? "error"
         : toast.classList.contains("dk-toast-ok")
@@ -1727,6 +2007,12 @@ export function mountAnnotator(options = {}) {
   });
   btnCopy.addEventListener("click", () => {
     void copyPacket();
+  });
+  btnUndo.addEventListener("click", () => {
+    undo();
+  });
+  btnRedo.addEventListener("click", () => {
+    redo();
   });
 
   // Route & resize listeners (passive)
@@ -1815,6 +2101,9 @@ export function mountAnnotator(options = {}) {
   }
 
   function removeItem(id) {
+    const removed = items.find((it) => it.id === id);
+    if (!removed) return;
+    recordHistory(`removed ${describeItem(removed)}`);
     items = items
       .filter((it) => it.id !== id)
       .map((it, idx) => ({ ...it, index: idx + 1 }));
@@ -1825,6 +2114,7 @@ export function mountAnnotator(options = {}) {
   }
 
   function clearItems() {
+    if (items.length > 0) recordHistory("cleared all redlines");
     items = [];
     closePopover();
     persistQueue();
@@ -1865,6 +2155,8 @@ export function mountAnnotator(options = {}) {
       });
       sending = false;
       clearItems();
+      // Sent redlines are never re-queued: a successful send ends history.
+      resetHistory();
       const label = res.runUrl
         ? `${res.message || "Fix started"} ·`
         : res.message || "Fix started";
@@ -1955,6 +2247,11 @@ export function mountAnnotator(options = {}) {
     },
     getItems: () => items.slice(),
     removeItem,
+    undo,
+    redo,
+    canUndo: () => undoStack.length > 0,
+    canRedo: () => redoStack.length > 0,
+    openRun,
     clearItems,
     getPacket,
     submitFix,
@@ -1966,8 +2263,7 @@ export function mountAnnotator(options = {}) {
       toast.hidden
         ? ""
         : `${toastText.textContent || ""} ${toastLink.hidden ? "" : toastLink.textContent || ""}`.trim(),
-    getToastHref: () =>
-      toast.hidden || toastLink.hidden ? "" : toastLink.href,
+    getToastHref: currentRunUrl,
     destroy,
   };
 }

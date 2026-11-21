@@ -151,16 +151,19 @@ export interface AnnotatorOptions {
   captureScreenshot?: () => Promise<string | null> | string | null;
   /** Optional host callback to pop the toolbar out into a native floating window. */
   onPopOut?: (coords: { screenX?: number; screenY?: number }) => void;
-  /** Optional callback fired whenever toolbar state (mode, tool, count, toast) changes. */
-  onStateChange?: (state: {
-    open: boolean;
-    mode: AnnotatorMode;
-    tool: AnnotatorTool;
-    sending: boolean;
-    count: number;
-    toastText: string;
-    toastKind: "" | "pending" | "ok" | "error";
-  }) => void;
+  /** Optional callback fired whenever toolbar state (mode, tool, count, toast, history) changes. */
+  onStateChange?: (state: AnnotatorState) => void;
+  /**
+   * Optional host handler for the toast's "Open run" link. It receives the
+   * absolute run URL. Without it the link opens in a new tab from the host
+   * page's window (also when the toolbar is popped out).
+   */
+  onOpenRun?: (url: string) => void;
+  /**
+   * Base a relative run URL resolves against. Defaults to the host page's
+   * address (never a popped-out toolbar's `about:blank` document).
+   */
+  runUrlBase?: string;
   onSubmit?: (
     packet: RedlinePacket,
   ) => Promise<{ message?: string; runUrl?: string } | void>;
@@ -171,6 +174,20 @@ export interface AnnotatorOptions {
   onItemsChange?: (items: RedlineItem[]) => void;
   container?: HTMLElement;
   document?: Document;
+}
+
+export interface AnnotatorState {
+  open: boolean;
+  mode: AnnotatorMode;
+  tool: AnnotatorTool;
+  sending: boolean;
+  count: number;
+  toastText: string;
+  toastKind: "" | "pending" | "ok" | "error";
+  /** Absolute run URL the toast links to, or "". */
+  toastUrl: string;
+  canUndo: boolean;
+  canRedo: boolean;
 }
 
 export interface UiBound {
@@ -199,6 +216,16 @@ export interface AnnotatorController {
   getItems(): RedlineItem[];
   removeItem(id: string): void;
   clearItems(): void;
+  /** Undo the last queue change (or cancel a shape being drawn); false when there is nothing to undo. */
+  undo(): boolean;
+  /** Redo the last undone queue change; false when there is nothing to redo. */
+  redo(): boolean;
+  canUndo(): boolean;
+  canRedo(): boolean;
+  /** Open the toast's run link through `onOpenRun` or a new tab; false when no link is showing. */
+  openRun(): boolean;
+  setDockHidden(hidden: boolean): void;
+  getState(): AnnotatorState;
   getPacket(): RedlinePacket;
   submitFix(): Promise<SubmitResult | null>;
   copyPacket(): Promise<SubmitResult>;
