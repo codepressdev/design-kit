@@ -41,6 +41,7 @@ import {
 } from "../src/annotate/fix-receiver.mjs";
 import { createNextFixHandler, getNextAnnotatorScript } from "../src/next.mjs";
 import { designKitAnnotate, getAnnotatorScriptHtml } from "../src/vite.mjs";
+import { TestDeadlineError, withTestDeadline } from "./helpers/deadline.mjs";
 
 const BIN_PATH = fileURLToPath(
   new URL("../bin/design-kit.mjs", import.meta.url),
@@ -143,22 +144,28 @@ function waitForFile(filePath, timeoutMs = 4000) {
   const immediate = tryRead();
   if (immediate !== null) return Promise.resolve(immediate);
 
-  return new Promise((resolveFile, rejectFile) => {
-    const watcher = watch(dirname(filePath), () => {
-      const content = tryRead();
-      if (content !== null) {
-        clearTimeout(timer);
-        watcher.close();
-        resolveFile(content);
-      }
-    });
-    const timer = setTimeout(() => {
-      watcher.close();
+  let watcher;
+  const watched = new Promise((resolveFile) => {
+    const check = () => {
       const content = tryRead();
       if (content !== null) resolveFile(content);
-      else rejectFile(new Error(`Timed out waiting for ${filePath}`));
-    }, timeoutMs);
+    };
+    watcher = watch(dirname(filePath), check);
+    // A write between the first read and the watch would raise no event.
+    check();
   });
+  return withTestDeadline(watched, {
+    message: `Timed out waiting for ${filePath}`,
+    ms: timeoutMs,
+  })
+    .catch((error) => {
+      if (!(error instanceof TestDeadlineError)) throw error;
+      // The watcher can miss a write on some filesystems; read once more.
+      const content = tryRead();
+      if (content !== null) return content;
+      throw new Error(`Timed out waiting for ${filePath}`);
+    })
+    .finally(() => watcher.close());
 }
 
 test("token comparison, origin allowlist, and path traversal detectors", () => {
@@ -784,19 +791,13 @@ test("CLI `design-kit annotate <url> --no-open` starts proxy and exits cleanly o
   );
 
   try {
-    const proxyUrl = await new Promise((resolveUrl, rejectUrl) => {
-      let stdout = "";
-      let stderr = "";
-      const timer = setTimeout(() => {
-        rejectUrl(
-          new Error(`CLI timed out. stdout=${stdout} stderr=${stderr}`),
-        );
-      }, 5000);
+    let stdout = "";
+    let stderr = "";
+    const announced = new Promise((resolveUrl, rejectUrl) => {
       child.stdout.on("data", (chunk) => {
         stdout += chunk.toString("utf8");
         const match = stdout.match(/http:\/\/127\.0\.0\.1:\d+/);
         if (match) {
-          clearTimeout(timer);
           resolveUrl(match[0]);
         }
       });
@@ -804,9 +805,15 @@ test("CLI `design-kit annotate <url> --no-open` starts proxy and exits cleanly o
         stderr += chunk.toString("utf8");
       });
       child.once("exit", (code) => {
-        clearTimeout(timer);
         rejectUrl(new Error(`CLI exited early (${code}): ${stderr}`));
       });
+    });
+    const proxyUrl = await withTestDeadline(announced, {
+      message: "CLI never printed its proxy URL",
+      ms: 5000,
+    }).catch((error) => {
+      if (!(error instanceof TestDeadlineError)) throw error;
+      throw new Error(`CLI timed out. stdout=${stdout} stderr=${stderr}`);
     });
 
     const resp = await fetch(proxyUrl);

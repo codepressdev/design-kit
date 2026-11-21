@@ -29,6 +29,7 @@ import { fileURLToPath } from "node:url";
 import { chromium } from "@playwright/test";
 
 import { designKitAnnotate } from "../../src/vite.mjs";
+import { TestDeadlineError, withTestDeadline } from "../helpers/deadline.mjs";
 
 const BIN_PATH = fileURLToPath(
   new URL("../../bin/design-kit.mjs", import.meta.url),
@@ -74,27 +75,30 @@ function waitForRecordLines(filePath, expectedCount, timeoutMs = 5000) {
   const immediate = tryRead();
   if (immediate !== null) return Promise.resolve(immediate);
 
-  return new Promise((resolveRecords, rejectRecords) => {
-    const watcher = watch(dirname(filePath), () => {
-      const parsed = tryRead();
-      if (parsed !== null) {
-        clearTimeout(timer);
-        watcher.close();
-        resolveRecords(parsed);
-      }
-    });
-    const timer = setTimeout(() => {
-      watcher.close();
+  let watcher;
+  const watched = new Promise((resolveRecords) => {
+    const check = () => {
       const parsed = tryRead();
       if (parsed !== null) resolveRecords(parsed);
-      else
-        rejectRecords(
-          new Error(
-            `Timed out waiting for ${expectedCount} record(s) in ${filePath}`,
-          ),
-        );
-    }, timeoutMs);
+    };
+    watcher = watch(dirname(filePath), check);
+    // A write between the first read and the watch would raise no event.
+    check();
   });
+  return withTestDeadline(watched, {
+    message: `Timed out waiting for ${expectedCount} record(s) in ${filePath}`,
+    ms: timeoutMs,
+  })
+    .catch((error) => {
+      if (!(error instanceof TestDeadlineError)) throw error;
+      // The watcher can miss a write on some filesystems; read once more.
+      const parsed = tryRead();
+      if (parsed !== null) return parsed;
+      throw new Error(
+        `Timed out waiting for ${expectedCount} record(s) in ${filePath}`,
+      );
+    })
+    .finally(() => watcher.close());
 }
 
 function renderTwoStateAppHtml() {
@@ -377,25 +381,26 @@ test("CLI `design-kit annotate <url> --no-open` end-to-end at Desktop (1280x800)
   );
 
   try {
-    const proxyUrl = await new Promise((resolveUrl, rejectUrl) => {
-      let stdout = "";
-      let stderr = "";
-      const timer = setTimeout(() => {
-        rejectUrl(
-          new Error(`CLI timed out. stdout=${stdout} stderr=${stderr}`),
-        );
-      }, 5000);
+    let stdout = "";
+    let stderr = "";
+    const announced = new Promise((resolveUrl) => {
       child.stdout.on("data", (chunk) => {
         stdout += chunk.toString("utf8");
         const match = stdout.match(/http:\/\/127\.0\.0\.1:\d+/);
         if (match) {
-          clearTimeout(timer);
           resolveUrl(match[0]);
         }
       });
       child.stderr.on("data", (chunk) => {
         stderr += chunk.toString("utf8");
       });
+    });
+    const proxyUrl = await withTestDeadline(announced, {
+      message: "CLI never printed its proxy URL",
+      ms: 5000,
+    }).catch((error) => {
+      if (!(error instanceof TestDeadlineError)) throw error;
+      throw new Error(`CLI timed out. stdout=${stdout} stderr=${stderr}`);
     });
 
     // Desktop 1280x800
