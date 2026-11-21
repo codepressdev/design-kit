@@ -558,3 +558,113 @@ test("Iframe postMessage transport pins source, origin, and channelId in real br
     await context.close();
   }
 });
+
+test("Freehand strokes stay visible on screen and capture both composited PNG screenshots and HTML metadata", async () => {
+  const context = await browser.newContext({
+    viewport: { width: 1024, height: 700 },
+  });
+  const page = await context.newPage();
+
+  try {
+    await page.goto(`${appServer.url}/orders`);
+    await page.locator("#export-btn").waitFor({ state: "visible" });
+
+    const btnBox = await page.locator("#export-btn").boundingBox();
+    assert.ok(btnBox);
+
+    await page.evaluate(() => {
+      window.__fhCtrl = window.__designKitAnnotate.mountAnnotator({
+        initialMode: "annotate",
+        initialTool: "freehand",
+        storageKey: false,
+      });
+    });
+
+    // Draw a freehand circle starting slightly outside #export-btn (on body/whitespace)
+    // and looping around #export-btn so centroid hits #export-btn.
+    const left = Math.max(2, btnBox.x - 10);
+    const top = Math.max(2, btnBox.y - 10);
+    const right = btnBox.x + btnBox.width + 10;
+    const bottom = btnBox.y + btnBox.height + 10;
+
+    await page.mouse.move(left, top);
+    await page.mouse.down();
+    await page.mouse.move(right, top, { steps: 4 });
+    await page.mouse.move(right, bottom, { steps: 4 });
+    await page.mouse.move(left, bottom, { steps: 4 });
+    await page.mouse.move(left, top, { steps: 4 });
+    await page.mouse.up();
+
+    await page.waitForFunction(() => window.__fhCtrl.getItems().length === 1);
+
+    // 1. Committed freehand stroke must remain rendered on screen after pointerup
+    const shapesAfterFirst = await page.evaluate(() =>
+      window.__fhCtrl.getCommittedShapeCount(),
+    );
+    assert.equal(
+      shapesAfterFirst,
+      1,
+      "freehand polyline must stay visible on screen after pointerup",
+    );
+
+    // 2. Switching to Browse mode keeps the stroke visible while overlay is open
+    await page.evaluate(() => window.__fhCtrl.setMode("browse"));
+    assert.equal(
+      await page.evaluate(() => window.__fhCtrl.getCommittedShapeCount()),
+      1,
+      "freehand stroke must stay visible in Browse mode while overlay is open",
+    );
+
+    // 3. Draw a second freehand stroke -> both stay visible on screen
+    await page.evaluate(() => window.__fhCtrl.setMode("annotate"));
+    await page.mouse.move(320, 200);
+    await page.mouse.down();
+    await page.mouse.move(420, 240, { steps: 4 });
+    await page.mouse.up();
+    await page.waitForFunction(() => window.__fhCtrl.getItems().length === 2);
+
+    assert.equal(
+      await page.evaluate(() => window.__fhCtrl.getCommittedShapeCount()),
+      2,
+      "both committed freehand strokes must remain visible on screen",
+    );
+
+    // 4. First freehand item captured BOTH PNG screenshot AND HTML data (#export-btn)
+    const items = await page.evaluate(() => window.__fhCtrl.getItems());
+    const first = items[0];
+    assert.equal(first.kind, "freehand");
+    assert.ok(first.points && first.points.length >= 4);
+    assert.ok(
+      first.snapshot?.dataUrl?.startsWith("data:image/png;base64,"),
+      "freehand item must include a PNG screenshot",
+    );
+    assert.ok(
+      first.snapshot.byteLength > 0 &&
+        first.snapshot.byteLength <= MAX_SNAPSHOT_BYTES,
+    );
+    assert.match(
+      first.outerHtml || "",
+      /export-btn/i,
+      "freehand circle around button should capture button HTML even when started on whitespace",
+    );
+
+    // 5. Collapsing hides shapes; reopening restores them; removing removes the shape
+    await page.evaluate(() => window.__fhCtrl.setOpen(false));
+    assert.equal(
+      await page.evaluate(() => window.__fhCtrl.getCommittedShapeCount()),
+      0,
+    );
+    await page.evaluate(() => window.__fhCtrl.setOpen(true));
+    assert.equal(
+      await page.evaluate(() => window.__fhCtrl.getCommittedShapeCount()),
+      2,
+    );
+    await page.evaluate((id) => window.__fhCtrl.removeItem(id), items[0].id);
+    assert.equal(
+      await page.evaluate(() => window.__fhCtrl.getCommittedShapeCount()),
+      1,
+    );
+  } finally {
+    await context.close();
+  }
+});

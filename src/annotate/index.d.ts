@@ -147,6 +147,8 @@ export interface AnnotatorOptions {
   initialOpen?: boolean;
   showLauncher?: boolean;
   transport?: AnnotatorTransport;
+  /** Optional host-provided native screenshot hook returning a PNG data URL. */
+  captureScreenshot?: () => Promise<string | null> | string | null;
   onSubmit?: (
     packet: RedlinePacket,
   ) => Promise<{ message?: string; runUrl?: string } | void>;

@@ -10,7 +10,10 @@ import {
   sanitizeRedlinePacket,
   sanitizeRoute,
 } from "./sanitize.mjs";
-import { captureCalloutSnapshot } from "./snapshot.mjs";
+import {
+  captureCalloutSnapshot,
+  compositeAnnotationsOnImage,
+} from "./snapshot.mjs";
 import {
   buildCssSelector,
   DEFAULT_SOURCEMAP_TIMEOUT_MS,
@@ -570,6 +573,12 @@ export function mountAnnotator(options = {}) {
   const svgNs = "http://www.w3.org/2000/svg";
   const svgLayer = doc.createElementNS(svgNs, "svg");
   svgLayer.setAttribute("class", "dk-svg-layer");
+  const committedSvgGroup = doc.createElementNS(svgNs, "g");
+  committedSvgGroup.setAttribute("class", "dk-svg-committed");
+  const draftSvgGroup = doc.createElementNS(svgNs, "g");
+  draftSvgGroup.setAttribute("class", "dk-svg-draft");
+  svgLayer.appendChild(committedSvgGroup);
+  svgLayer.appendChild(draftSvgGroup);
   root.appendChild(svgLayer);
 
   const markersLayer = doc.createElement("div");
@@ -816,7 +825,100 @@ export function mountAnnotator(options = {}) {
   }
 
   function clearDraftSvg() {
-    while (svgLayer.firstChild) svgLayer.removeChild(svgLayer.firstChild);
+    while (draftSvgGroup.firstChild)
+      draftSvgGroup.removeChild(draftSvgGroup.firstChild);
+  }
+
+  function appendArrowSvg(targetGroup, x1, y1, x2, y2, itemId) {
+    const line = doc.createElementNS(svgNs, "line");
+    line.setAttribute("x1", String(x1));
+    line.setAttribute("y1", String(y1));
+    line.setAttribute("x2", String(x2));
+    line.setAttribute("y2", String(y2));
+    line.setAttribute("stroke", "#ef4444");
+    line.setAttribute("stroke-width", "3");
+    if (itemId) line.setAttribute("data-item-id", itemId);
+    targetGroup.appendChild(line);
+
+    const dist = Math.hypot(x2 - x1, y2 - y1);
+    if (dist >= 4) {
+      const angle = Math.atan2(y2 - y1, x2 - x1);
+      const headLen = 12;
+      const p1x = x2 - headLen * Math.cos(angle - Math.PI / 6);
+      const p1y = y2 - headLen * Math.sin(angle - Math.PI / 6);
+      const p2x = x2 - headLen * Math.cos(angle + Math.PI / 6);
+      const p2y = y2 - headLen * Math.sin(angle + Math.PI / 6);
+      const head = doc.createElementNS(svgNs, "polygon");
+      head.setAttribute("points", `${x2},${y2} ${p1x},${p1y} ${p2x},${p2y}`);
+      head.setAttribute("fill", "#ef4444");
+      if (itemId) head.setAttribute("data-item-id", itemId);
+      targetGroup.appendChild(head);
+    }
+  }
+
+  function renderCommittedShapes() {
+    while (committedSvgGroup.firstChild) {
+      committedSvgGroup.removeChild(committedSvgGroup.firstChild);
+    }
+    if (!open) return;
+
+    const routeNow = currentRoute(win);
+    for (const item of items) {
+      if (item.route !== routeNow) continue;
+      if (
+        item.kind === "freehand" &&
+        Array.isArray(item.points) &&
+        item.points.length > 1
+      ) {
+        const poly = doc.createElementNS(svgNs, "polyline");
+        poly.setAttribute(
+          "points",
+          item.points.map((p) => `${p.x},${p.y}`).join(" "),
+        );
+        poly.setAttribute("fill", "none");
+        poly.setAttribute("stroke", "#ef4444");
+        poly.setAttribute("stroke-width", "3");
+        poly.setAttribute("stroke-linecap", "round");
+        poly.setAttribute("stroke-linejoin", "round");
+        poly.setAttribute("data-item-id", item.id);
+        committedSvgGroup.appendChild(poly);
+      } else if (item.kind === "box" && item.rect) {
+        const r = doc.createElementNS(svgNs, "rect");
+        r.setAttribute("x", String(item.rect.x));
+        r.setAttribute("y", String(item.rect.y));
+        r.setAttribute("width", String(item.rect.width));
+        r.setAttribute("height", String(item.rect.height));
+        r.setAttribute("fill", "rgba(239, 68, 68, 0.14)");
+        r.setAttribute("stroke", "#ef4444");
+        r.setAttribute("stroke-width", "2");
+        r.setAttribute("stroke-dasharray", "6 4");
+        r.setAttribute("data-item-id", item.id);
+        committedSvgGroup.appendChild(r);
+      } else if (item.kind === "arrow") {
+        const fromPt = item.from?.rect
+          ? {
+              x: item.from.rect.x + item.from.rect.width / 2,
+              y: item.from.rect.y + item.from.rect.height / 2,
+            }
+          : item.point;
+        const toPt = item.to?.rect
+          ? {
+              x: item.to.rect.x + item.to.rect.width / 2,
+              y: item.to.rect.y + item.to.rect.height / 2,
+            }
+          : item.toPoint;
+        if (fromPt && toPt) {
+          appendArrowSvg(
+            committedSvgGroup,
+            fromPt.x,
+            fromPt.y,
+            toPt.x,
+            toPt.y,
+            item.id,
+          );
+        }
+      }
+    }
   }
 
   function renderDraftPreview(draft) {
@@ -837,16 +939,16 @@ export function mountAnnotator(options = {}) {
       r.setAttribute("stroke", "#ef4444");
       r.setAttribute("stroke-width", "2");
       r.setAttribute("stroke-dasharray", "6 4");
-      svgLayer.appendChild(r);
+      draftSvgGroup.appendChild(r);
     } else if (draft.kind === "arrow") {
-      const line = doc.createElementNS(svgNs, "line");
-      line.setAttribute("x1", String(draft.startX));
-      line.setAttribute("y1", String(draft.startY));
-      line.setAttribute("x2", String(draft.curX));
-      line.setAttribute("y2", String(draft.curY));
-      line.setAttribute("stroke", "#ef4444");
-      line.setAttribute("stroke-width", "3");
-      svgLayer.appendChild(line);
+      appendArrowSvg(
+        draftSvgGroup,
+        draft.startX,
+        draft.startY,
+        draft.curX,
+        draft.curY,
+        null,
+      );
     } else if (draft.kind === "freehand" && draft.points.length > 1) {
       const poly = doc.createElementNS(svgNs, "polyline");
       poly.setAttribute(
@@ -858,7 +960,7 @@ export function mountAnnotator(options = {}) {
       poly.setAttribute("stroke-width", "3");
       poly.setAttribute("stroke-linecap", "round");
       poly.setAttribute("stroke-linejoin", "round");
-      svgLayer.appendChild(poly);
+      draftSvgGroup.appendChild(poly);
     }
   }
 
@@ -952,6 +1054,7 @@ export function mountAnnotator(options = {}) {
       chipsWrap.appendChild(chip);
     }
 
+    renderCommittedShapes();
     renderMarkers();
   }
 
@@ -1134,6 +1237,46 @@ export function mountAnnotator(options = {}) {
     } else if (d.kind === "freehand") {
       item.points = d.points.slice(0, MAX_FREEHAND_POINTS);
       item.point = item.points[0] || { x: d.startX, y: d.startY };
+      let minX = Infinity;
+      let minY = Infinity;
+      let maxX = -Infinity;
+      let maxY = -Infinity;
+      for (const pt of item.points) {
+        if (pt.x < minX) minX = pt.x;
+        if (pt.y < minY) minY = pt.y;
+        if (pt.x > maxX) maxX = pt.x;
+        if (pt.y > maxY) maxY = pt.y;
+      }
+      if (Number.isFinite(minX) && maxX - minX > 2 && maxY - minY > 2) {
+        item.rect = {
+          x: Math.round(minX),
+          y: Math.round(minY),
+          width: Math.round(maxX - minX),
+          height: Math.round(maxY - minY),
+        };
+      }
+      const startTag = String(primaryEl?.tagName || "").toLowerCase();
+      if (!primaryEl || startTag === "html" || startTag === "body") {
+        // When the user circles an element starting on whitespace, hit-test
+        // the center of the freehand bounding box and then the stroke midpoint.
+        const probes = [];
+        if (Number.isFinite(minX)) {
+          probes.push({
+            x: Math.round((minX + maxX) / 2),
+            y: Math.round((minY + maxY) / 2),
+          });
+        }
+        const midPt = item.points[Math.floor(item.points.length / 2)];
+        if (midPt) probes.push(midPt);
+        for (const probe of probes) {
+          const hit = hitTestElement(probe.x, probe.y);
+          const hitTag = String(hit?.tagName || "").toLowerCase();
+          if (hit && hitTag !== "html" && hitTag !== "body") {
+            primaryEl = hit;
+            break;
+          }
+        }
+      }
       anchorX = d.curX;
       anchorY = d.curY;
     }
@@ -1150,11 +1293,33 @@ export function mountAnnotator(options = {}) {
       item.owners = meta.owners;
     }
 
-    // Immediate per-step composited callout PNG snapshot
-    const snapshot = captureCalloutSnapshot(item, {
-      document: doc,
-      ignoreTag: HOST_TAG,
-    });
+    // Immediate per-step composited callout PNG snapshot including all
+    // persistent annotations currently visible on this route.
+    const currentRouteAnnotations = [
+      ...items.filter((it) => it.route === route),
+      item,
+    ];
+    let snapshot;
+    if (typeof options.captureScreenshot === "function") {
+      try {
+        const baseDataUrl = await options.captureScreenshot();
+        if (baseDataUrl) {
+          snapshot = await compositeAnnotationsOnImage(baseDataUrl, item, {
+            document: doc,
+            allAnnotations: currentRouteAnnotations,
+          });
+        }
+      } catch {
+        snapshot = undefined;
+      }
+    }
+    if (!snapshot) {
+      snapshot = captureCalloutSnapshot(item, {
+        document: doc,
+        ignoreTag: HOST_TAG,
+        allAnnotations: currentRouteAnnotations,
+      });
+    }
     if (snapshot) {
       item.snapshot = snapshot;
     }
@@ -1201,6 +1366,7 @@ export function mountAnnotator(options = {}) {
   // Route & resize listeners (passive)
   const onRouteOrResize = () => {
     if (destroyed) return;
+    renderCommittedShapes();
     renderMarkers();
     if (!popover.hidden && activePopoverItemId) {
       const vp = currentViewport(win, doc);
@@ -1416,6 +1582,7 @@ export function mountAnnotator(options = {}) {
     copyPacket,
     getUiBounds,
     getControlRect,
+    getCommittedShapeCount: () => committedSvgGroup.childNodes.length,
     getToastText: () =>
       toast.hidden
         ? ""

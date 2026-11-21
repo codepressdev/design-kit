@@ -294,8 +294,17 @@ function paintDomToContext(ctx, doc, vw, vh, ignoreTag) {
       ctx.restore();
     }
 
-    // Images (cross-origin safe)
+    // Canvas elements (same-origin / untainted safe)
     const tag = String(el.tagName || "").toLowerCase();
+    if (tag === "canvas" && el.width > 0 && el.height > 0) {
+      try {
+        ctx.drawImage(el, x, y, w, h);
+      } catch {
+        // Ignore tainted canvas
+      }
+    }
+
+    // Images (cross-origin safe)
     if (tag === "img") {
       const sameOrigin = isSameOriginImage(el, pageOrigin, pageHref);
       if (sameOrigin && el.complete && el.naturalWidth > 0) {
@@ -325,6 +334,52 @@ function paintDomToContext(ctx, doc, vw, vh, ignoreTag) {
       }
     }
 
+    // Form control values (<input>, <textarea>, <select>)
+    if (tag === "input" || tag === "textarea" || tag === "select") {
+      const inputType = String(el.getAttribute?.("type") || "").toLowerCase();
+      if (
+        inputType !== "password" &&
+        inputType !== "hidden" &&
+        inputType !== "checkbox" &&
+        inputType !== "radio"
+      ) {
+        let val = "";
+        let isPlaceholder = false;
+        if (tag === "select") {
+          const opt = el.options?.[el.selectedIndex];
+          val = String(opt?.text || el.value || "").trim();
+        } else {
+          val = String(el.value || "").trim();
+          if (!val) {
+            val = String(el.getAttribute?.("placeholder") || "").trim();
+            isPlaceholder = Boolean(val);
+          }
+        }
+        if (val) {
+          const fontSize = Math.max(
+            9,
+            Math.min(32, parseFloat(cs.fontSize) || 13),
+          );
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(x, y, w, h);
+          ctx.clip();
+          ctx.fillStyle = isPlaceholder ? "#71717a" : cs.color || "#111827";
+          ctx.font = `${cs.fontWeight || "400"} ${fontSize}px system-ui, -apple-system, sans-serif`;
+          ctx.textBaseline = "top";
+          const padL = parseFloat(cs.paddingLeft) || 6;
+          const padT = parseFloat(cs.paddingTop) || 4;
+          ctx.fillText(
+            val.slice(0, 140),
+            x + padL,
+            y + padT,
+            Math.max(10, w - padL * 2),
+          );
+          ctx.restore();
+        }
+      }
+    }
+
     // Direct text nodes
     const textParts = [];
     for (const child of el.childNodes || []) {
@@ -334,7 +389,7 @@ function paintDomToContext(ctx, doc, vw, vh, ignoreTag) {
       }
     }
     if (textParts.length > 0) {
-      const text = textParts.join(" ").slice(0, 120);
+      const text = textParts.join(" ").slice(0, 240);
       const fontSize = Math.max(9, Math.min(48, parseFloat(cs.fontSize) || 13));
       const fontWeight = cs.fontWeight || "400";
       ctx.save();
@@ -345,8 +400,31 @@ function paintDomToContext(ctx, doc, vw, vh, ignoreTag) {
       ctx.font = `${fontWeight} ${fontSize}px system-ui, -apple-system, sans-serif`;
       ctx.textBaseline = "top";
       const padL = parseFloat(cs.paddingLeft) || 2;
+      const padR = parseFloat(cs.paddingRight) || 2;
       const padT = parseFloat(cs.paddingTop) || 2;
-      ctx.fillText(text, x + padL, y + padT, Math.max(10, w - padL * 2));
+      const maxTextW = Math.max(10, w - padL - padR);
+      const lineH = Math.round(fontSize * 1.35);
+      if (h >= lineH * 1.8 && typeof ctx.measureText === "function") {
+        const words = text.split(/\s+/);
+        let line = "";
+        let cy = y + padT;
+        for (const word of words) {
+          const test = line ? `${line} ${word}` : word;
+          if (line && ctx.measureText(test).width > maxTextW) {
+            ctx.fillText(line, x + padL, cy, maxTextW);
+            line = word;
+            cy += lineH;
+            if (cy > y + h) break;
+          } else {
+            line = test;
+          }
+        }
+        if (line && cy <= y + h) {
+          ctx.fillText(line, x + padL, cy, maxTextW);
+        }
+      } else {
+        ctx.fillText(text, x + padL, y + padT, maxTextW);
+      }
       ctx.restore();
     }
   }
@@ -377,8 +455,107 @@ function base64ByteLength(dataUrl) {
   return Math.floor(((dataUrl.length - idx - 1) * 3) / 4);
 }
 
+function drawAllCallouts(ctx, annotation, allAnnotations) {
+  if (Array.isArray(allAnnotations) && allAnnotations.length > 0) {
+    for (const other of allAnnotations) {
+      if (!other || other === annotation || other.id === annotation?.id) {
+        continue;
+      }
+      drawCalloutOverlay(ctx, other);
+    }
+  }
+  if (annotation) {
+    drawCalloutOverlay(ctx, annotation);
+  }
+}
+
 /**
- * Capture a live composited callout PNG snapshot for a single annotation item.
+ * Composite all active callouts (including persistent freehand strokes) onto
+ * a host-provided real screenshot PNG data URL, bounded to <= 1 MiB.
+ */
+export async function compositeAnnotationsOnImage(
+  baseDataUrl,
+  annotation,
+  options = {},
+) {
+  const doc =
+    options.document ||
+    (typeof globalThis.document === "object" ? globalThis.document : null);
+  const win = doc?.defaultView || globalThis;
+  const allAnnotations = options.allAnnotations;
+  if (
+    !baseDataUrl ||
+    typeof baseDataUrl !== "string" ||
+    !doc ||
+    typeof doc.createElement !== "function" ||
+    typeof win.Image !== "function"
+  ) {
+    return undefined;
+  }
+
+  const vw = Math.max(
+    1,
+    Math.round(win.innerWidth || doc.documentElement?.clientWidth || 1280),
+  );
+  const vh = Math.max(
+    1,
+    Math.round(win.innerHeight || doc.documentElement?.clientHeight || 800),
+  );
+
+  const img = await new Promise((resolve) => {
+    const el = new win.Image();
+    el.onload = () => resolve(el);
+    el.onerror = () => resolve(null);
+    el.src = baseDataUrl;
+  });
+  if (!img || !img.naturalWidth || !img.naturalHeight) return undefined;
+
+  const initialScale = Math.min(
+    1,
+    MAX_CANVAS_WIDTH / vw,
+    MAX_CANVAS_HEIGHT / vh,
+  );
+  const scales = [
+    initialScale,
+    initialScale * 0.75,
+    initialScale * 0.5,
+    initialScale * 0.35,
+  ];
+
+  for (const scale of scales) {
+    const cw = Math.max(1, Math.round(vw * scale));
+    const ch = Math.max(1, Math.round(vh * scale));
+    const canvas = doc.createElement("canvas");
+    canvas.width = cw;
+    canvas.height = ch;
+    const ctx = canvas.getContext?.("2d");
+    if (!ctx) return undefined;
+
+    ctx.scale(scale, scale);
+    try {
+      ctx.drawImage(img, 0, 0, vw, vh);
+      drawAllCallouts(ctx, annotation, allAnnotations);
+      const dataUrl = canvas.toDataURL("image/png");
+      const byteLength = base64ByteLength(dataUrl);
+      if (byteLength > 0 && byteLength <= MAX_SNAPSHOT_BYTES) {
+        return {
+          dataUrl,
+          width: cw,
+          height: ch,
+          byteLength,
+          crossOriginPlaceholders: 0,
+        };
+      }
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Capture a live composited callout PNG snapshot for an annotation item,
+ * including all persistent annotations currently visible on the same route.
  * Always resolves (never throws SecurityError) and keeps PNG <= 1 MiB.
  */
 export function captureCalloutSnapshot(annotation, options = {}) {
@@ -387,6 +564,7 @@ export function captureCalloutSnapshot(annotation, options = {}) {
     (typeof globalThis.document === "object" ? globalThis.document : null);
   const win = doc?.defaultView || globalThis;
   const ignoreTag = options.ignoreTag || "design-kit-annotator";
+  const allAnnotations = options.allAnnotations;
 
   if (!doc || typeof doc.createElement !== "function") {
     return undefined;
@@ -431,7 +609,7 @@ export function captureCalloutSnapshot(annotation, options = {}) {
       ctx.fillStyle = "#18181b";
       ctx.fillRect(0, 0, vw, vh);
     }
-    drawCalloutOverlay(ctx, annotation);
+    drawAllCallouts(ctx, annotation, allAnnotations);
 
     try {
       const dataUrl = canvas.toDataURL("image/png");
@@ -455,7 +633,7 @@ export function captureCalloutSnapshot(annotation, options = {}) {
       safeCtx.scale(scale, scale);
       safeCtx.fillStyle = "#18181b";
       safeCtx.fillRect(0, 0, vw, vh);
-      drawCalloutOverlay(safeCtx, annotation);
+      drawAllCallouts(safeCtx, annotation, allAnnotations);
       const safeUrl = safeCanvas.toDataURL("image/png");
       return {
         dataUrl: safeUrl,
