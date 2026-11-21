@@ -668,3 +668,84 @@ test("Freehand strokes stay visible on screen and capture both composited PNG sc
     await context.close();
   }
 });
+
+test("Annotate toolbar box drags freely anywhere in viewport and triggers onPopOut when dragged outside window", async () => {
+  const context = await browser.newContext({
+    viewport: { width: 1024, height: 700 },
+  });
+  const page = await context.newPage();
+
+  try {
+    await page.goto(`${appServer.url}/orders`);
+    await page.locator("#export-btn").waitFor({ state: "visible" });
+
+    await page.evaluate(() => {
+      window.__popOutCalls = [];
+      window.__dragCtrl = window.__designKitAnnotate.mountAnnotator({
+        initialMode: "annotate",
+        storageKey: false,
+        onPopOut(coords) {
+          window.__popOutCalls.push(coords);
+        },
+      });
+    });
+
+    const beforeRect = await page.evaluate(() =>
+      window.__dragCtrl.getDockRect(),
+    );
+    const handleRect = await page.evaluate(() =>
+      window.__dragCtrl.getControlRect("drag-handle"),
+    );
+    assert.ok(beforeRect && handleRect);
+
+    // Drag the toolbar from bottom-right up-left by (-160, -250), staying inside viewport
+    await page.mouse.move(handleRect.centerX, handleRect.centerY);
+    await page.mouse.down();
+    await page.mouse.move(handleRect.centerX - 160, handleRect.centerY - 250, {
+      steps: 6,
+    });
+    await page.mouse.up();
+
+    const afterRect = await page.evaluate(() =>
+      window.__dragCtrl.getDockRect(),
+    );
+    assert.ok(
+      afterRect.x < beforeRect.x - 100 && afterRect.y < beforeRect.y - 150,
+      `expected dock to move up-left (before=${JSON.stringify(beforeRect)}, after=${JSON.stringify(afterRect)})`,
+    );
+    assert.equal(
+      await page.evaluate(() => window.__popOutCalls.length),
+      0,
+      "in-viewport drag must not invoke onPopOut",
+    );
+
+    // Dragging past the edge of the viewport triggers onPopOut
+    const handleAfter = await page.evaluate(() =>
+      window.__dragCtrl.getControlRect("drag-handle"),
+    );
+    await page.mouse.move(handleAfter.centerX, handleAfter.centerY);
+    await page.mouse.down();
+    await page.mouse.move(-40, handleAfter.centerY, { steps: 4 });
+    await page.mouse.up();
+
+    const popOutCount = await page.evaluate(() => window.__popOutCalls.length);
+    assert.equal(
+      popOutCount,
+      1,
+      "dragging past viewport edge must invoke onPopOut",
+    );
+
+    // setDockHidden(true) hides the docked bar; setDockHidden(false) restores it
+    await page.evaluate(() => window.__dragCtrl.setDockHidden(true));
+    assert.equal(
+      await page.evaluate(() => window.__dragCtrl.getDockRect().width),
+      0,
+    );
+    await page.evaluate(() => window.__dragCtrl.setDockHidden(false));
+    assert.ok(
+      (await page.evaluate(() => window.__dragCtrl.getDockRect().width)) > 0,
+    );
+  } finally {
+    await context.close();
+  }
+});

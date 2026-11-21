@@ -149,6 +149,18 @@ export interface AnnotatorOptions {
   transport?: AnnotatorTransport;
   /** Optional host-provided native screenshot hook returning a PNG data URL. */
   captureScreenshot?: () => Promise<string | null> | string | null;
+  /** Optional host callback to pop the toolbar out into a native floating window. */
+  onPopOut?: (coords: { screenX?: number; screenY?: number }) => void;
+  /** Optional callback fired whenever toolbar state (mode, tool, count, toast) changes. */
+  onStateChange?: (state: {
+    open: boolean;
+    mode: AnnotatorMode;
+    tool: AnnotatorTool;
+    sending: boolean;
+    count: number;
+    toastText: string;
+    toastKind: "" | "pending" | "ok" | "error";
+  }) => void;
   onSubmit?: (
     packet: RedlinePacket,
   ) => Promise<{ message?: string; runUrl?: string } | void>;

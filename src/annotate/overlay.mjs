@@ -118,6 +118,52 @@ const OVERLAY_CSS = `
   border: 1px solid #3f3f46;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
   font-size: 12px;
+  user-select: none;
+}
+.dk-bar.dk-dragging {
+  cursor: grabbing;
+}
+.dk-drag-handle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 24px;
+  color: #71717a;
+  cursor: grab;
+  touch-action: none;
+  flex-shrink: 0;
+  border-radius: 4px;
+  font-size: 13px;
+  letter-spacing: -1px;
+  line-height: 1;
+}
+.dk-drag-handle:hover {
+  color: #e4e4e7;
+  background: #27272a;
+}
+.dk-bar.dk-dragging .dk-drag-handle {
+  cursor: grabbing;
+}
+.dk-dock[data-dk-dock-hidden="true"] {
+  display: none;
+}
+.dk-dock.dk-pip-dock {
+  position: static;
+  right: auto;
+  bottom: auto;
+  left: auto;
+  top: auto;
+  max-width: 100%;
+  width: 100%;
+  align-items: flex-start;
+}
+.dk-dock.dk-pip-dock .dk-bar {
+  max-width: 100%;
+  width: 100%;
+  border-radius: 0;
+  border: none;
+  box-shadow: none;
 }
 .dk-seg {
   display: inline-flex;
@@ -301,6 +347,12 @@ const OVERLAY_CSS = `
   justify-content: space-between;
   font-size: 11px;
   color: #a1a1aa;
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+}
+.dk-popover-head:active {
+  cursor: grabbing;
 }
 .dk-popover textarea {
   width: 100%;
@@ -651,6 +703,13 @@ export function mountAnnotator(options = {}) {
   bar.setAttribute("aria-label", "Screen annotator");
   dock.appendChild(bar);
 
+  const dragHandle = doc.createElement("span");
+  dragHandle.className = "dk-drag-handle";
+  dragHandle.textContent = "⋮⋮";
+  dragHandle.setAttribute("role", "presentation");
+  dragHandle.setAttribute("aria-label", "Drag annotator toolbar");
+  dragHandle.title = "Drag to move toolbar";
+
   const modeSeg = doc.createElement("div");
   modeSeg.className = "dk-seg";
   modeSeg.setAttribute("role", "tablist");
@@ -697,13 +756,33 @@ export function mountAnnotator(options = {}) {
   btnSend.className = "dk-btn dk-btn-send";
   btnSend.textContent = "Send to Fix";
 
+  const canDocPip =
+    typeof win.documentPictureInPicture?.requestWindow === "function";
+  const hasHostPopOut = typeof options.onPopOut === "function";
+  const btnPopOut = doc.createElement("button");
+  btnPopOut.type = "button";
+  btnPopOut.className = "dk-btn";
+  btnPopOut.textContent = "↗";
+  btnPopOut.title = "Pop out toolbar outside app window";
+  btnPopOut.setAttribute("aria-label", "Pop out toolbar");
+  btnPopOut.hidden = !(canDocPip || hasHostPopOut);
+
   const btnCollapse = doc.createElement("button");
   btnCollapse.type = "button";
   btnCollapse.className = "dk-btn";
   btnCollapse.textContent = "×";
   btnCollapse.setAttribute("aria-label", "Collapse annotator");
 
-  bar.append(modeSeg, toolsWrap, countBadge, btnCopy, btnSend, btnCollapse);
+  bar.append(
+    dragHandle,
+    modeSeg,
+    toolsWrap,
+    countBadge,
+    btnCopy,
+    btnSend,
+    btnPopOut,
+    btnCollapse,
+  );
 
   const launcher = doc.createElement("button");
   launcher.type = "button";
@@ -722,6 +801,8 @@ export function mountAnnotator(options = {}) {
     "tool-freehand": toolButtons.freehand,
     "send-fix": btnSend,
     "copy-packet": btnCopy,
+    "pop-out": btnPopOut,
+    "drag-handle": dragHandle,
     collapse: btnCollapse,
     launcher,
     "note-input": popInput,
@@ -1056,6 +1137,7 @@ export function mountAnnotator(options = {}) {
 
     renderCommittedShapes();
     renderMarkers();
+    options.onStateChange?.(getStateSnapshot());
   }
 
   // Capture-phase keyboard listener ONLY attached while Annotate mode is active
@@ -1347,9 +1429,293 @@ export function mountAnnotator(options = {}) {
     clearDraftSvg();
   });
 
+  // Draggable dock positioning + Pop-out outside the app window
+  const posStorageKey = storageKey ? `${storageKey}:pos` : null;
+  let dockPos = null;
+  let pipWindow = null;
+  let dockHidden = false;
+
+  if (posStorageKey) {
+    try {
+      const savedPos = win.sessionStorage?.getItem(posStorageKey);
+      if (savedPos) {
+        const parsed = JSON.parse(savedPos);
+        if (
+          parsed &&
+          typeof parsed.left === "number" &&
+          typeof parsed.top === "number" &&
+          Number.isFinite(parsed.left) &&
+          Number.isFinite(parsed.top)
+        ) {
+          dockPos = { left: parsed.left, top: parsed.top };
+        }
+      }
+    } catch {
+      // ignore storage errors
+    }
+  }
+
+  function applyDockPosition(nextPos, persist = false) {
+    if (!nextPos || pipWindow) return;
+    const vp = currentViewport(win, doc);
+    const pad = 4;
+    const rect = dock.getBoundingClientRect();
+    const w = rect.width || 320;
+    const h = rect.height || 44;
+    const clampedLeft = Math.max(
+      pad,
+      Math.min(Math.round(nextPos.left), Math.max(pad, vp.width - w - pad)),
+    );
+    const clampedTop = Math.max(
+      pad,
+      Math.min(Math.round(nextPos.top), Math.max(pad, vp.height - h - pad)),
+    );
+    dockPos = { left: clampedLeft, top: clampedTop };
+    dock.style.left = `${clampedLeft}px`;
+    dock.style.top = `${clampedTop}px`;
+    dock.style.right = "auto";
+    dock.style.bottom = "auto";
+    dock.style.alignItems =
+      clampedLeft + w / 2 < vp.width / 2 ? "flex-start" : "flex-end";
+    if (persist && posStorageKey) {
+      try {
+        win.sessionStorage?.setItem(posStorageKey, JSON.stringify(dockPos));
+      } catch {
+        // ignore storage errors
+      }
+    }
+  }
+
+  function dockBackFromPip() {
+    if (!pipWindow) return;
+    const oldPip = pipWindow;
+    pipWindow = null;
+    dock.classList.remove("dk-pip-dock");
+    btnPopOut.textContent = "↗";
+    btnPopOut.title = "Pop out toolbar outside app window";
+    btnPopOut.setAttribute("aria-label", "Pop out toolbar");
+    if (dock.parentNode !== root) {
+      root.appendChild(dock);
+    }
+    if (dockPos) applyDockPosition(dockPos, false);
+    try {
+      if (!oldPip.closed) oldPip.close();
+    } catch {
+      // ignore
+    }
+  }
+
+  async function togglePopOut(coords) {
+    if (hasHostPopOut) {
+      options.onPopOut({
+        screenX: coords?.screenX,
+        screenY: coords?.screenY,
+      });
+      return;
+    }
+    if (!canDocPip) return;
+    if (pipWindow) {
+      dockBackFromPip();
+      return;
+    }
+    try {
+      const barRect = bar.getBoundingClientRect();
+      const dockRect = dock.getBoundingClientRect();
+      const pip = await win.documentPictureInPicture.requestWindow({
+        width: Math.max(460, Math.min(720, Math.ceil(barRect.width) + 24)),
+        height: Math.max(88, Math.min(260, Math.ceil(dockRect.height) + 28)),
+      });
+      pipWindow = pip;
+      pip.document.title = "CodePress Annotate";
+      const pipStyle = pip.document.createElement("style");
+      pipStyle.textContent = `html,body{margin:0;padding:8px;background:#09090b;color:#f4f4f5;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;overflow:auto;}\n${OVERLAY_CSS}`;
+      pip.document.head.appendChild(pipStyle);
+      dock.classList.add("dk-pip-dock");
+      dock.style.left = "";
+      dock.style.top = "";
+      dock.style.right = "";
+      dock.style.bottom = "";
+      pip.document.body.appendChild(dock);
+      btnPopOut.textContent = "↙";
+      btnPopOut.title = "Dock toolbar back inside app";
+      btnPopOut.setAttribute("aria-label", "Dock toolbar back");
+      pip.addEventListener("pagehide", () => {
+        if (pipWindow === pip) dockBackFromPip();
+      });
+    } catch {
+      // User cancelled or PiP unavailable; stay docked
+    }
+  }
+
+  // Drag handler for .dk-bar (grip handle or any non-button area)
+  let dockDrag = null;
+  bar.addEventListener("pointerdown", (e) => {
+    if (pipWindow) return;
+    if (e.button !== 0 && e.pointerType === "mouse") return;
+    const target = e.target;
+    if (
+      target &&
+      target !== dragHandle &&
+      typeof target.closest === "function" &&
+      target.closest("button, a, input, textarea, select")
+    ) {
+      return;
+    }
+    e.preventDefault();
+    e.stopPropagation();
+    const rect = dock.getBoundingClientRect();
+    dockDrag = {
+      pointerId: e.pointerId,
+      offsetX: e.clientX - rect.left,
+      offsetY: e.clientY - rect.top,
+      detached: false,
+    };
+    bar.classList.add("dk-dragging");
+    try {
+      bar.setPointerCapture?.(e.pointerId);
+    } catch {
+      // ignore synthetic events
+    }
+  });
+
+  bar.addEventListener("pointermove", (e) => {
+    if (!dockDrag) return;
+    e.preventDefault();
+    const vp = currentViewport(win, doc);
+    const edgeMargin = 24;
+    if (
+      hasHostPopOut &&
+      !dockDrag.detached &&
+      (e.clientX < -edgeMargin ||
+        e.clientY < -edgeMargin ||
+        e.clientX > vp.width + edgeMargin ||
+        e.clientY > vp.height + edgeMargin)
+    ) {
+      dockDrag.detached = true;
+      bar.classList.remove("dk-dragging");
+      try {
+        bar.releasePointerCapture?.(dockDrag.pointerId);
+      } catch {
+        // ignore
+      }
+      dockDrag = null;
+      options.onPopOut({ screenX: e.screenX, screenY: e.screenY });
+      return;
+    }
+    applyDockPosition(
+      {
+        left: e.clientX - dockDrag.offsetX,
+        top: e.clientY - dockDrag.offsetY,
+      },
+      false,
+    );
+  });
+
+  const endDockDrag = (e) => {
+    if (!dockDrag) return;
+    const wasDetached = dockDrag.detached;
+    dockDrag = null;
+    bar.classList.remove("dk-dragging");
+    try {
+      if (e?.pointerId != null) bar.releasePointerCapture?.(e.pointerId);
+    } catch {
+      // ignore
+    }
+    if (!wasDetached && dockPos) {
+      applyDockPosition(dockPos, true);
+    }
+  };
+  bar.addEventListener("pointerup", endDockDrag);
+  bar.addEventListener("pointercancel", endDockDrag);
+
+  // Drag handler for .dk-popover via its header
+  let popDrag = null;
+  popHead.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0 && e.pointerType === "mouse") return;
+    const target = e.target;
+    if (
+      target &&
+      typeof target.closest === "function" &&
+      target.closest("button")
+    ) {
+      return;
+    }
+    e.preventDefault();
+    e.stopPropagation();
+    const rect = popover.getBoundingClientRect();
+    popDrag = {
+      pointerId: e.pointerId,
+      offsetX: e.clientX - rect.left,
+      offsetY: e.clientY - rect.top,
+    };
+    try {
+      popHead.setPointerCapture?.(e.pointerId);
+    } catch {
+      // ignore
+    }
+  });
+  popHead.addEventListener("pointermove", (e) => {
+    if (!popDrag) return;
+    e.preventDefault();
+    const vp = currentViewport(win, doc);
+    const rect = popover.getBoundingClientRect();
+    const w = rect.width || 264;
+    const h = rect.height || 132;
+    const pad = 4;
+    const left = Math.max(
+      pad,
+      Math.min(Math.round(e.clientX - popDrag.offsetX), vp.width - w - pad),
+    );
+    const top = Math.max(
+      pad,
+      Math.min(Math.round(e.clientY - popDrag.offsetY), vp.height - h - pad),
+    );
+    popover.style.left = `${left}px`;
+    popover.style.top = `${top}px`;
+  });
+  const endPopDrag = (e) => {
+    if (!popDrag) return;
+    popDrag = null;
+    try {
+      if (e?.pointerId != null) popHead.releasePointerCapture?.(e.pointerId);
+    } catch {
+      // ignore
+    }
+  };
+  popHead.addEventListener("pointerup", endPopDrag);
+  popHead.addEventListener("pointercancel", endPopDrag);
+
+  function setDockHidden(nextHidden) {
+    dockHidden = Boolean(nextHidden);
+    dock.setAttribute("data-dk-dock-hidden", String(dockHidden));
+  }
+
+  function getStateSnapshot() {
+    return {
+      open,
+      mode,
+      tool,
+      sending,
+      count: items.length,
+      toastText: toast.hidden
+        ? ""
+        : `${toastText.textContent || ""} ${toastLink.hidden ? "" : toastLink.textContent || ""}`.trim(),
+      toastKind: toast.classList.contains("dk-toast-err")
+        ? "error"
+        : toast.classList.contains("dk-toast-ok")
+          ? "ok"
+          : toast.hidden
+            ? ""
+            : "pending",
+    };
+  }
+
   // Button handlers
   btnBrowse.addEventListener("click", () => setMode("browse"));
   btnAnnotate.addEventListener("click", () => setMode("annotate"));
+  btnPopOut.addEventListener("click", (e) => {
+    void togglePopOut({ screenX: e.screenX, screenY: e.screenY });
+  });
   btnCollapse.addEventListener("click", () => setOpen(false));
   launcher.addEventListener("click", () => setOpen(true));
   popClose.addEventListener("click", closePopover);
@@ -1368,6 +1734,9 @@ export function mountAnnotator(options = {}) {
     if (destroyed) return;
     renderCommittedShapes();
     renderMarkers();
+    if (dockPos && !pipWindow) {
+      applyDockPosition(dockPos, false);
+    }
     if (!popover.hidden && activePopoverItemId) {
       const vp = currentViewport(win, doc);
       clampPopover(vp.width, vp.height);
@@ -1554,6 +1923,7 @@ export function mountAnnotator(options = {}) {
   function destroy() {
     if (destroyed) return;
     destroyed = true;
+    dockBackFromPip();
     syncListeners();
     controlBridge?.destroy();
     win.removeEventListener("popstate", onRouteOrResize);
@@ -1565,6 +1935,9 @@ export function mountAnnotator(options = {}) {
   container.appendChild(host);
   syncListeners();
   render();
+  if (dockPos) {
+    applyDockPosition(dockPos, false);
+  }
 
   return {
     host,
@@ -1574,6 +1947,12 @@ export function mountAnnotator(options = {}) {
     setTool,
     isOpen: () => open,
     setOpen,
+    setDockHidden,
+    getState: getStateSnapshot,
+    getDockRect: () => {
+      const r = dock.getBoundingClientRect();
+      return { x: r.left, y: r.top, width: r.width, height: r.height };
+    },
     getItems: () => items.slice(),
     removeItem,
     clearItems,
