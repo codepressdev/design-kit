@@ -1,5 +1,11 @@
 # @codepress/design-kit
 
+## 0.19.1
+
+### Patch Changes
+
+- 8add835: Improve mobile and touch UX for `@codepress/design-kit/annotate`: add a red Annotate-mode perimeter ring and 1-tap `Annotating · Tap to Browse` exit pill, allow vertical touch scrolling in Pin mode (`touch-action: pan-y` and ignore touch drags >12px), condense the mobile dock into a thumb-friendly 2-row bar (collapsing to 1 row in Browse mode) with 28px touch markers, and render the note input as a `visualViewport`-aware mobile sheet with a 16px textarea font and `focus({ preventScroll: true })` to avoid iOS Safari auto-zoom and keyboard overlap.
+
 ## 0.19.0
 
 ### Minor Changes
