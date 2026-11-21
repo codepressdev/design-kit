@@ -1,5 +1,11 @@
 # @codepress/design-kit
 
+## 0.19.0
+
+### Minor Changes
+
+- df1e471: Screen annotator: "Open run ↗" after Send to Fix now opens the run. The link is always an absolute address (a relative run URL resolves against the host page, or the new `runUrlBase` option, never a popped-out toolbar's blank window), and the new `onOpenRun(url)` option lets a host route it itself; without one it opens in a new tab from the host page. In CodePress Terminal the link opens the Orchestrator project or chat inside Terminal, also from the native pop-out toolbar, which now shows an "Open run ↗" button. The toolbar also gains Undo and Redo buttons, with Cmd/Ctrl+Z, Shift+Cmd/Ctrl+Z and Ctrl+Y while the annotator is open (left alone in text fields, terminals and code editors). History covers adding, removing, editing notes and clearing, keeps 100 steps for the page session, and ends when Send to Fix succeeds. The controller adds `undo()`, `redo()`, `canUndo()`, `canRedo()` and `openRun()`, and its state adds `toastUrl`, `canUndo` and `canRedo`.
+
 ## 0.18.0
 
 ### Minor Changes
