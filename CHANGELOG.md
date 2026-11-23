@@ -1,5 +1,11 @@
 # @codepress/design-kit
 
+## 0.19.2
+
+### Patch Changes
+
+- 6a0a630: Spaces typed in an annotation note stay in the note again while the Plans canvas is on screen. Before, the canvas took each space as "Space + drag to pan", so "fix the button" was saved as "fixthebutton". Space pressed on the canvas itself still pans.
+
 ## 0.19.1
 
 ### Patch Changes
