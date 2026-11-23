@@ -221,12 +221,58 @@ test("Multi-state Browse <-> Annotate & Send to Fix in a live app", async () => 
       () => window.__annotator.getItems().length === 1,
     );
 
+    // A host shortcut listening on window in the bubble phase, like the plan
+    // canvas's "Space + drag pans" (#25258): it takes Space unless the key
+    // comes from a field, and a key from the closed shadow root arrives
+    // retargeted to <design-kit-annotator>.
+    await page.evaluate(() => {
+      window.__hostKeys = [];
+      for (const type of ["keydown", "keyup", "keypress"]) {
+        window.addEventListener(type, (event) => {
+          window.__hostKeys.push({
+            type,
+            key: event.key,
+            ctrl: event.ctrlKey,
+            meta: event.metaKey,
+          });
+          const target = event.target;
+          const field =
+            target instanceof HTMLElement &&
+            (target.isContentEditable || target.closest("input, textarea"));
+          if (type === "keydown" && event.key === " " && !field) {
+            event.preventDefault();
+          }
+        });
+      }
+    });
+
     // Type note and save
     const noteSaveRect = await page.evaluate(() =>
       window.__annotator.getControlRect("note-save"),
     );
     await page.keyboard.type("Rename to Export CSV");
+    // Plain typing in the note stays in the note; a modified key (the host's
+    // own Ctrl/Cmd+Shift+X toggle) still reaches the host.
+    const hostSawTyping = await page.evaluate(() => window.__hostKeys);
+    await page.keyboard.press("Control+Shift+X");
+    await page.keyboard.press("Meta+Shift+X");
     await page.mouse.click(noteSaveRect.centerX, noteSaveRect.centerY);
+    assert.equal(
+      await page.evaluate(() => window.__annotator.getItems()[0].note),
+      "Rename to Export CSV",
+    );
+    assert.deepEqual(hostSawTyping, []);
+    assert.deepEqual(
+      await page.evaluate(() =>
+        window.__hostKeys
+          .filter((k) => k.type === "keydown" && k.key.toLowerCase() === "x")
+          .map((k) => ({ ctrl: k.ctrl, meta: k.meta })),
+      ),
+      [
+        { ctrl: true, meta: false },
+        { ctrl: false, meta: true },
+      ],
+    );
 
     // 2. Switch to Browse mode by clicking the Browse button in the Shadow-DOM bar
     const browseBtn = await page.evaluate(() =>

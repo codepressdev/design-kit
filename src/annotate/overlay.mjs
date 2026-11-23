@@ -908,6 +908,23 @@ export function mountAnnotator(options = {}) {
   host.setAttribute("data-design-kit-annotator", "1");
   const shadow = host.attachShadow({ mode: "closed" });
 
+  // Plain typing in the overlay's own fields stays inside it. Outside the
+  // closed root a key arrives retargeted to the host, so a host shortcut
+  // that only spares keys from fields (the plan canvas's Space-to-pan)
+  // would take the note's spaces (#25258). Keys with Ctrl/Meta/Alt still
+  // reach the host for its own shortcuts (Cmd/Ctrl+Shift+X), and Escape
+  // still does, already handled by the overlay's capture-phase listener.
+  const keepTypingInside = (event) => {
+    if (event.ctrlKey || event.metaKey || event.altKey) return;
+    if (event.key === "Escape") return;
+    const path =
+      typeof event.composedPath === "function" ? event.composedPath() : [];
+    if (isNativeUndoTarget(path[0] || event.target)) event.stopPropagation();
+  };
+  for (const type of ["keydown", "keypress", "keyup"]) {
+    shadow.addEventListener(type, keepTypingInside);
+  }
+
   const styleEl = doc.createElement("style");
   styleEl.textContent = OVERLAY_CSS;
   shadow.appendChild(styleEl);
