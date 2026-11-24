@@ -193,6 +193,296 @@ function drawCalloutOverlay(ctx, annotation) {
   ctx.restore();
 }
 
+const MAX_PAINT_NODES = 6000;
+
+function intersectRect(a, b) {
+  return {
+    left: Math.max(a.left, b.left),
+    top: Math.max(a.top, b.top),
+    right: Math.min(a.right, b.right),
+    bottom: Math.min(a.bottom, b.bottom),
+  };
+}
+
+function isEmptyRect(r) {
+  return r.right <= r.left || r.bottom <= r.top;
+}
+
+function clipsOverflow(value) {
+  return (
+    value === "hidden" ||
+    value === "clip" ||
+    value === "auto" ||
+    value === "scroll"
+  );
+}
+
+/**
+ * Walk the DOM once and return what to paint, in paint order. Each entry
+ * carries the clip of its scroll/overflow ancestors, so content scrolled out
+ * of a list does not paint over the list's headers, and a coarse stacking
+ * bucket (negative z, in-flow, positioned, positive z) so sticky and
+ * overlaid layers paint above the in-flow content they cover, as the browser
+ * paints them. Subtrees that are display:none or entirely clipped are skipped
+ * so the node budget is spent on what is visible.
+ */
+function collectPaintEntries(doc, win, vw, vh, ignoreTag) {
+  const viewport = { left: 0, top: 0, right: vw, bottom: vh };
+  const entries = [];
+  const stack = [{ node: doc.body, clip: viewport, z: 0, positioned: false }];
+  let visited = 0;
+  let order = 0;
+
+  while (stack.length > 0 && visited < MAX_PAINT_NODES) {
+    const frame = stack.pop();
+    const node = frame.node;
+    if (!node || node.nodeType !== 1) continue;
+    const tag = String(node.tagName || "").toLowerCase();
+    if (
+      tag === ignoreTag ||
+      tag === "script" ||
+      tag === "style" ||
+      tag === "noscript" ||
+      tag === "template"
+    ) {
+      continue;
+    }
+    visited += 1;
+
+    let rect;
+    let cs;
+    try {
+      rect = node.getBoundingClientRect();
+      cs = win.getComputedStyle(node);
+    } catch {
+      continue;
+    }
+    // display:none and opacity:0 hide the whole subtree.
+    if (!cs || cs.display === "none" || Number(cs.opacity) === 0) continue;
+
+    const position = cs.position || "static";
+    let clip = position === "fixed" ? viewport : frame.clip;
+    let z = frame.z;
+    let positioned = frame.positioned;
+    if (position !== "static") {
+      positioned = true;
+      const zi = parseInt(cs.zIndex, 10);
+      if (Number.isFinite(zi)) z = zi;
+    }
+
+    const hasBox = rect && rect.width > 0 && rect.height > 0;
+    if (
+      hasBox &&
+      cs.visibility !== "hidden" &&
+      !(
+        rect.right < clip.left ||
+        rect.bottom < clip.top ||
+        rect.left > clip.right ||
+        rect.top > clip.bottom
+      )
+    ) {
+      const bucket = z < 0 ? 0 : z > 0 ? 3 : positioned ? 2 : 1;
+      entries.push({ el: node, rect, cs, clip, bucket, z, order: order++ });
+    }
+
+    // An <svg> is painted as a whole by paintSvg.
+    if (tag === "svg") continue;
+
+    if (
+      hasBox &&
+      (clipsOverflow(cs.overflowX) || clipsOverflow(cs.overflowY))
+    ) {
+      clip = intersectRect(clip, {
+        left: rect.left,
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+      });
+    }
+    // Children of a fully clipped box can only show if they are fixed;
+    // skip them to keep the walk within budget.
+    if (isEmptyRect(clip)) continue;
+
+    const children = node.children;
+    if (children && children.length) {
+      for (let i = children.length - 1; i >= 0; i -= 1) {
+        stack.push({ node: children[i], clip, z, positioned });
+      }
+    }
+  }
+
+  entries.sort((a, b) => a.bucket - b.bucket || a.z - b.z || a.order - b.order);
+  return entries;
+}
+
+function svgNumber(el, name, fallback = 0) {
+  const raw = el.getAttribute?.(name);
+  const n = parseFloat(raw);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function svgPoints(el) {
+  const raw = String(el.getAttribute?.("points") || "").trim();
+  const nums = raw
+    .split(/[\s,]+/)
+    .map(Number)
+    .filter(Number.isFinite);
+  const pts = [];
+  for (let i = 0; i + 1 < nums.length; i += 2) pts.push([nums[i], nums[i + 1]]);
+  return pts;
+}
+
+function svgShapePath(el, PathCtor) {
+  const tag = String(el.tagName || "").toLowerCase();
+  const p = new PathCtor();
+  switch (tag) {
+    case "path": {
+      const d = el.getAttribute?.("d");
+      return d ? new PathCtor(d) : null;
+    }
+    case "line":
+      p.moveTo(svgNumber(el, "x1"), svgNumber(el, "y1"));
+      p.lineTo(svgNumber(el, "x2"), svgNumber(el, "y2"));
+      return p;
+    case "circle":
+      p.arc(
+        svgNumber(el, "cx"),
+        svgNumber(el, "cy"),
+        svgNumber(el, "r"),
+        0,
+        Math.PI * 2,
+      );
+      return p;
+    case "ellipse":
+      if (typeof p.ellipse !== "function") return null;
+      p.ellipse(
+        svgNumber(el, "cx"),
+        svgNumber(el, "cy"),
+        svgNumber(el, "rx"),
+        svgNumber(el, "ry"),
+        0,
+        0,
+        Math.PI * 2,
+      );
+      return p;
+    case "rect": {
+      const x = svgNumber(el, "x");
+      const y = svgNumber(el, "y");
+      const w = svgNumber(el, "width");
+      const h = svgNumber(el, "height");
+      const rx = Math.min(
+        svgNumber(el, "rx", svgNumber(el, "ry")),
+        w / 2,
+        h / 2,
+      );
+      if (rx > 0 && typeof p.roundRect === "function")
+        p.roundRect(x, y, w, h, rx);
+      else p.rect(x, y, w, h);
+      return p;
+    }
+    case "polyline":
+    case "polygon": {
+      const pts = svgPoints(el);
+      if (pts.length === 0) return null;
+      p.moveTo(pts[0][0], pts[0][1]);
+      for (const [px, py] of pts.slice(1)) p.lineTo(px, py);
+      if (tag === "polygon") p.closePath();
+      return p;
+    }
+    default:
+      return null;
+  }
+}
+
+/**
+ * Paint an inline <svg> icon from its shapes (path, line, circle, ellipse,
+ * rect, polyline, polygon) using each shape's computed fill and stroke, so
+ * icon sets like lucide show up instead of leaving blank spaces. Gradients,
+ * masks, text and <use> are not drawn.
+ */
+function paintSvg(ctx, svg, rect, win) {
+  const PathCtor = win.Path2D || globalThis.Path2D;
+  if (typeof PathCtor !== "function") return;
+  const vb = svg.viewBox?.baseVal;
+  const vbW = vb && vb.width > 0 ? vb.width : rect.width;
+  const vbH = vb && vb.height > 0 ? vb.height : rect.height;
+  const vbX = vb && vb.width > 0 ? vb.x : 0;
+  const vbY = vb && vb.height > 0 ? vb.y : 0;
+  // preserveAspectRatio xMidYMid meet, the default.
+  const scale = Math.min(rect.width / vbW, rect.height / vbH);
+  const offX = rect.left + (rect.width - vbW * scale) / 2;
+  const offY = rect.top + (rect.height - vbH * scale) / 2;
+
+  const shapes = svg.querySelectorAll?.(
+    "path, line, circle, ellipse, rect, polyline, polygon",
+  );
+  if (!shapes) return;
+  let drawn = 0;
+  for (const shape of shapes) {
+    if (drawn++ > 200) break;
+    if (shape.closest?.("defs, clipPath, mask, pattern, symbol, marker"))
+      continue;
+    let cs;
+    try {
+      cs = win.getComputedStyle(shape);
+    } catch {
+      continue;
+    }
+    if (!cs || cs.display === "none" || cs.visibility === "hidden") continue;
+    let path;
+    try {
+      path = svgShapePath(shape, PathCtor);
+    } catch {
+      continue;
+    }
+    if (!path) continue;
+    const opacity = Number(cs.opacity);
+    ctx.save();
+    ctx.translate(offX, offY);
+    ctx.scale(scale, scale);
+    ctx.translate(-vbX, -vbY);
+    if (Number.isFinite(opacity) && opacity < 1) ctx.globalAlpha *= opacity;
+    const fill = cs.fill;
+    if (
+      fill &&
+      fill !== "none" &&
+      !fill.startsWith("url(") &&
+      !isTransparent(fill)
+    ) {
+      ctx.fillStyle = fill;
+      try {
+        ctx.fill(path, cs.fillRule === "evenodd" ? "evenodd" : "nonzero");
+      } catch {
+        // Ignore an unpaintable fill
+      }
+    }
+    const stroke = cs.stroke;
+    const strokeWidth = parseFloat(cs.strokeWidth);
+    if (
+      stroke &&
+      stroke !== "none" &&
+      !stroke.startsWith("url(") &&
+      !isTransparent(stroke) &&
+      strokeWidth > 0
+    ) {
+      ctx.strokeStyle = stroke;
+      // vector-effect: non-scaling-stroke keeps the width in screen pixels.
+      ctx.lineWidth =
+        cs.vectorEffect === "non-scaling-stroke"
+          ? strokeWidth / scale
+          : strokeWidth;
+      ctx.lineCap = cs.strokeLinecap || "butt";
+      ctx.lineJoin = cs.strokeLinejoin || "miter";
+      try {
+        ctx.stroke(path);
+      } catch {
+        // Ignore an unpaintable stroke
+      }
+    }
+    ctx.restore();
+  }
+}
+
 function paintDomToContext(ctx, doc, vw, vh, ignoreTag) {
   const win = doc.defaultView || globalThis;
   const pageOrigin = win.location?.origin || "";
@@ -214,56 +504,28 @@ function paintDomToContext(ctx, doc, vw, vh, ignoreTag) {
   ctx.fillStyle = bg;
   ctx.fillRect(0, 0, vw, vh);
 
-  if (!doc.body || typeof doc.createTreeWalker !== "function") {
+  if (!doc.body) {
     return crossOriginPlaceholders;
   }
 
-  const elements = [];
-  const stack = [doc.body];
-  let visited = 0;
-  const MAX_NODES = 1200;
+  const entries = collectPaintEntries(doc, win, vw, vh, ignoreTag);
 
-  while (stack.length > 0 && visited < MAX_NODES) {
-    const node = stack.pop();
-    if (!node || node.nodeType !== 1) continue;
-    const tag = String(node.tagName || "").toLowerCase();
-    if (
-      tag === ignoreTag ||
-      tag === "script" ||
-      tag === "style" ||
-      tag === "noscript"
-    ) {
+  for (const { el, rect, cs, clip } of entries) {
+    const tagName = String(el.tagName || "").toLowerCase();
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(
+      clip.left,
+      clip.top,
+      clip.right - clip.left,
+      clip.bottom - clip.top,
+    );
+    ctx.clip();
+    if (tagName === "svg") {
+      paintSvg(ctx, el, rect, win);
+      ctx.restore();
       continue;
     }
-    visited += 1;
-    elements.push(node);
-    const children = node.children;
-    if (children && children.length) {
-      for (let i = children.length - 1; i >= 0; i -= 1) {
-        stack.push(children[i]);
-      }
-    }
-  }
-
-  for (const el of elements) {
-    let rect;
-    let cs;
-    try {
-      rect = el.getBoundingClientRect();
-      cs = win.getComputedStyle(el);
-    } catch {
-      continue;
-    }
-    if (!rect || rect.width <= 0 || rect.height <= 0) continue;
-    if (rect.right < 0 || rect.bottom < 0 || rect.left > vw || rect.top > vh)
-      continue;
-    if (
-      cs.display === "none" ||
-      cs.visibility === "hidden" ||
-      Number(cs.opacity) === 0
-    )
-      continue;
-
     const x = rect.left;
     const y = rect.top;
     const w = rect.width;
@@ -427,6 +689,7 @@ function paintDomToContext(ctx, doc, vw, vh, ignoreTag) {
       }
       ctx.restore();
     }
+    ctx.restore();
   }
 
   return crossOriginPlaceholders;

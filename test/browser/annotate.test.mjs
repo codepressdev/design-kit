@@ -1341,3 +1341,93 @@ test("Tightest layout-matrix zero-spill check (320x844, 390x844, 1280x800) with 
     await pipContext.close();
   }
 });
+
+test("DOM snapshot clips scrolled content, keeps sticky layers on top, skips opacity:0 subtrees and draws inline SVG icons", async () => {
+  const context = await browser.newContext({
+    viewport: { width: 393, height: 640 },
+    deviceScaleFactor: 1,
+  });
+  const page = await context.newPage();
+  try {
+    const cards = Array.from(
+      { length: 30 },
+      (_, i) =>
+        `<div style="position:relative;padding:10px;color:#fafafa">Card ${i}<br>Body text for card ${i}</div>`,
+    ).join("");
+    await page.setContent(`<!doctype html><html><head><style>
+      body { margin: 0; background: rgb(24, 24, 27); font: 13px sans-serif; }
+      #icon { position: absolute; left: 10px; top: 110px; width: 48px; height: 48px; color: rgb(0, 200, 0); }
+      #list { position: absolute; left: 72px; top: 100px; width: 321px; height: 400px; overflow-y: auto; }
+      #head { position: sticky; top: 0; z-index: 10; height: 40px; background: rgb(39, 39, 42); }
+      #ghost { position: absolute; inset: 0; opacity: 0; }
+      #ghost div { position: absolute; left: 0; top: 520px; width: 393px; height: 100px; background: rgb(255, 0, 0); }
+    </style></head><body>
+      <svg id="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="4"><line x1="2" y1="12" x2="22" y2="12"/></svg>
+      <div id="list"><div id="head"></div>${cards}</div>
+      <div id="ghost"><div></div></div>
+    </body></html>`);
+    await page.addScriptTag({ content: RUNTIME_SCRIPT });
+    await page.evaluate(() => {
+      document.getElementById("list").scrollTop = 300;
+    });
+
+    const pixels = await page.evaluate(async () => {
+      const shot = window.__designKitAnnotate.captureCalloutSnapshot(null, {
+        document,
+      });
+      const img = new Image();
+      await new Promise((resolve) => {
+        img.onload = resolve;
+        img.src = shot.dataUrl;
+      });
+      const canvas = document.createElement("canvas");
+      canvas.width = img.naturalWidth;
+      canvas.height = img.naturalHeight;
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(img, 0, 0);
+      const region = (x, y, w, h) => {
+        const data = ctx.getImageData(x, y, w, h).data;
+        let bright = 0;
+        let red = 0;
+        let green = 0;
+        for (let i = 0; i < data.length; i += 4) {
+          const [r, g, b] = [data[i], data[i + 1], data[i + 2]];
+          if (r > 150 && g > 150 && b > 150) bright += 1;
+          if (r > 200 && g < 80 && b < 80) red += 1;
+          if (g > 150 && r < 80 && b < 80) green += 1;
+        }
+        return { bright, red, green };
+      };
+      return {
+        size: [canvas.width, canvas.height],
+        // The 40px sticky header, which the scrolled cards pass under.
+        header: region(72, 100, 321, 40),
+        // Above the list: cards scrolled out of it must not paint here.
+        aboveList: region(72, 0, 321, 100),
+        // The list's visible body: cards are painted.
+        body: region(72, 160, 321, 300),
+        // Where the opacity:0 subtree sits.
+        ghost: region(0, 520, 393, 100),
+        // The inline SVG icon's stroke.
+        icon: region(10, 110, 48, 48),
+      };
+    });
+
+    assert.deepEqual(pixels.size, [393, 640]);
+    assert.equal(
+      pixels.header.bright,
+      0,
+      "card text painted over the sticky header",
+    );
+    assert.equal(
+      pixels.aboveList.bright,
+      0,
+      "scrolled-out cards painted outside their scroller",
+    );
+    assert.ok(pixels.body.bright > 0, "visible cards were not painted");
+    assert.equal(pixels.ghost.red, 0, "an opacity:0 subtree was painted");
+    assert.ok(pixels.icon.green > 0, "the inline SVG icon was not painted");
+  } finally {
+    await context.close();
+  }
+});
