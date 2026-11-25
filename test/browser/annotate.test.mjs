@@ -1431,3 +1431,323 @@ test("DOM snapshot clips scrolled content, keeps sticky layers on top, skips opa
     await context.close();
   }
 });
+
+// Real touch emulation (hasTouch + CDP touch events, so Chromium generates
+// the pointer events and the trailing compatibility mouse events itself).
+async function openTouchAnnotator(vp = { width: 390, height: 844 }) {
+  const context = await browser.newContext({
+    viewport: vp,
+    hasTouch: true,
+    isMobile: true,
+  });
+  const page = await context.newPage();
+  await page.addInitScript(() => {
+    const origAttachShadow = Element.prototype.attachShadow;
+    Element.prototype.attachShadow = function (init) {
+      const sr = origAttachShadow.call(this, init);
+      if (this.tagName?.toLowerCase() === "design-kit-annotator") {
+        window.__testShadowRoot = sr;
+      }
+      return sr;
+    };
+    // True only while a pointerup is being dispatched on the capture layer:
+    // set by a document capture listener, cleared by a listener the test adds
+    // on the layer after the overlay's own.
+    window.__inPointerup = false;
+    document.addEventListener(
+      "pointerup",
+      () => {
+        window.__inPointerup = true;
+      },
+      true,
+    );
+    window.__noteFocus = [];
+    window.__events = [];
+    const origFocus = HTMLElement.prototype.focus;
+    HTMLElement.prototype.focus = function (opts) {
+      if (this.tagName === "TEXTAREA") {
+        window.__noteFocus.push({ inPointerup: window.__inPointerup });
+      }
+      return origFocus.call(this, opts);
+    };
+  });
+  await page.goto(`${appServer.url}/orders`);
+  await page.evaluate(() => {
+    window.__pendingShots = [];
+    window.__touchNote = window.__designKitAnnotate.mountAnnotator({
+      initialMode: "annotate",
+      initialTool: "pin",
+      storageKey: false,
+      // A host screenshot that stays pending until the test releases it,
+      // like a slow source-map fetch or native capture on a device:
+      // completing a mark must not wait for it before focusing the note.
+      captureScreenshot: () =>
+        new Promise((resolve) => window.__pendingShots.push(resolve)),
+    });
+    const sr = window.__testShadowRoot;
+    sr.querySelector(".dk-capture").addEventListener("pointerup", () => {
+      window.__inPointerup = false;
+    });
+    const ta = sr.querySelector(".dk-popover textarea");
+    ta.addEventListener("blur", () => window.__events.push("note-blur"));
+    for (const type of ["mousedown", "click"]) {
+      sr.addEventListener(type, () => window.__events.push(type));
+    }
+  });
+  const cdp = await context.newCDPSession(page);
+  const touch = async (type, points) =>
+    cdp.send("Input.dispatchTouchEvent", {
+      type,
+      touchPoints: points.map(([x, y]) => ({ x, y })),
+    });
+  const drag = async (from, to) => {
+    await touch("touchStart", [from]);
+    for (let i = 1; i <= 6; i++) {
+      const x = from[0] + ((to[0] - from[0]) * i) / 6;
+      const y = from[1] + ((to[1] - from[1]) * i) / 6;
+      await touch("touchMove", [[x, y]]);
+    }
+    await touch("touchEnd", []);
+  };
+  const noteState = () =>
+    page.evaluate(() => {
+      const sr = window.__testShadowRoot;
+      return {
+        items: window.__touchNote.getItems().length,
+        popoverOpen: !sr.querySelector(".dk-popover").hidden,
+        active: sr.activeElement?.tagName || null,
+        focus: window.__noteFocus.splice(0),
+        events: window.__events.splice(0),
+      };
+    });
+  return { context, page, drag, noteState };
+}
+
+test("Touch: completing a pin focuses the note inside the completing pointer event, and the tap's compat events neither blur it nor add a mark", async () => {
+  for (const vp of [
+    { width: 390, height: 844 },
+    { width: 320, height: 844 },
+  ]) {
+    const { context, page, noteState } = await openTouchAnnotator(vp);
+    try {
+      await page.touchscreen.tap(120, 220);
+      const after = await noteState();
+      assert.equal(after.items, 1, `one pin at ${vp.width}px`);
+      assert.equal(after.popoverOpen, true);
+      assert.equal(after.active, "TEXTAREA");
+      assert.ok(
+        after.focus.length > 0 && after.focus[0].inPointerup === true,
+        `note focus must be called inside the completing pointerup, got ${JSON.stringify(after.focus)}`,
+      );
+      assert.deepEqual(
+        after.events,
+        [],
+        "the completing tap's compat mousedown/click must not reach the overlay or blur the note",
+      );
+
+      // Snapshot and source hints still attach after the sheet opened.
+      await page.evaluate(() => {
+        for (const release of window.__pendingShots.splice(0)) release(null);
+      });
+      await page.waitForFunction(
+        () => !!window.__touchNote.getItems()[0]?.snapshot,
+      );
+      assert.equal(
+        await page.evaluate(
+          () => window.__testShadowRoot.activeElement?.tagName,
+        ),
+        "TEXTAREA",
+        "late snapshot must not move focus",
+      );
+
+      // Negative: after the field is blurred, a tap on it focuses it again
+      // and does not count as a canvas tap.
+      const box = await page.evaluate(() => {
+        const ta = window.__testShadowRoot.querySelector(
+          ".dk-popover textarea",
+        );
+        ta.blur();
+        const r = ta.getBoundingClientRect();
+        return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+      });
+      await noteState();
+      await page.touchscreen.tap(box.x, box.y);
+      const refocus = await noteState();
+      assert.equal(refocus.active, "TEXTAREA");
+      assert.equal(refocus.items, 1, "tapping the note must not add a mark");
+      await page.keyboard.type("Tighten gap");
+      assert.equal(
+        await page.evaluate(
+          () =>
+            window.__testShadowRoot.querySelector(".dk-popover textarea").value,
+        ),
+        "Tighten gap",
+      );
+
+      // A second mark while the note is open keeps the first note's text and
+      // focuses the new mark's note.
+      await page.touchscreen.tap(200, 120);
+      const second = await noteState();
+      assert.equal(second.items, 2);
+      assert.equal(second.active, "TEXTAREA");
+      assert.equal(second.focus.at(-1)?.inPointerup, true);
+      assert.equal(
+        await page.evaluate(() => window.__touchNote.getItems()[0].note),
+        "Tighten gap",
+      );
+    } finally {
+      await context.close();
+    }
+  }
+});
+
+test("Touch: box, arrow and freehand completion focus the note inside the completing pointer event", async () => {
+  const { context, page, drag, noteState } = await openTouchAnnotator();
+  try {
+    let expected = 0;
+    for (const tool of ["box", "arrow", "freehand"]) {
+      await page.evaluate((t) => {
+        const sr = window.__testShadowRoot;
+        sr.querySelector(".dk-popover").hidden = true;
+        sr.activeElement?.blur?.();
+        window.__touchNote.setTool(t);
+      }, tool);
+      await noteState();
+      await drag([60, 160 + expected * 120], [220, 240 + expected * 120]);
+      expected += 1;
+      const s = await noteState();
+      assert.equal(s.items, expected, `${tool} drag creates a mark`);
+      assert.equal(s.popoverOpen, true, `${tool} opens the note`);
+      assert.equal(s.active, "TEXTAREA", `${tool} focuses the note`);
+      assert.ok(
+        s.focus.length > 0 && s.focus[0].inPointerup === true,
+        `${tool}: focus inside pointerup, got ${JSON.stringify(s.focus)}`,
+      );
+      assert.deepEqual(s.events, [], `${tool}: no compat events`);
+      assert.equal(
+        await page.evaluate(
+          (i) => window.__touchNote.getItems()[i].kind,
+          expected - 1,
+        ),
+        tool,
+      );
+    }
+  } finally {
+    await context.close();
+  }
+});
+
+test("Phone: the overlay publishes steady insets for its banner and whole dock, unchanged by Browse or new marks, and clears them on close and destroy", async () => {
+  const { context, page } = await openTouchAnnotator();
+  try {
+    const read = () =>
+      page.evaluate(() => {
+        const sr = window.__testShadowRoot;
+        const style = document.documentElement.style;
+        const banner = sr.querySelector(".dk-mode-banner");
+        const bar = sr.querySelector(".dk-bar");
+        const chips = sr.querySelector(".dk-chips");
+        const chipTop = chips.hidden
+          ? Infinity
+          : chips.getBoundingClientRect().top;
+        return {
+          top: style.getPropertyValue("--dk-annotate-inset-top"),
+          bottom: style.getPropertyValue("--dk-annotate-inset-bottom"),
+          bannerBottom: banner.hidden
+            ? 0
+            : Math.ceil(banner.getBoundingClientRect().bottom),
+          barTop: bar.getBoundingClientRect().top,
+          chipTop,
+          vh: window.innerHeight,
+        };
+      });
+    const empty = await read();
+    assert.ok(empty.bannerBottom > 0, "banner shows in Annotate mode");
+    assert.equal(empty.top, `${empty.bannerBottom}px`);
+    const bottom = parseInt(empty.bottom, 10);
+    // With no marks the chips row's room is already reserved above the bar.
+    assert.ok(
+      bottom >= Math.ceil(empty.vh - empty.barTop) + 32,
+      `bottom inset ${bottom} must reserve the chips row above the toolbar (bar top ${empty.barTop})`,
+    );
+
+    // A first mark shows the chips row inside the reserved room: no change,
+    // and the chips are inside the published inset.
+    await page.touchscreen.tap(120, 220);
+    await page.waitForFunction(
+      () => window.__touchNote.getItems().length === 1,
+    );
+    const marked = await read();
+    assert.equal(marked.bottom, empty.bottom);
+    assert.ok(
+      marked.chipTop >= marked.vh - bottom - 0.5,
+      `chips (top ${marked.chipTop}) must sit inside the ${bottom}px inset`,
+    );
+
+    // Undo shows the dock's toast; a brief toast does not move the inset.
+    await page.evaluate(() => window.__touchNote.undo());
+    await page.waitForFunction(
+      () => !window.__testShadowRoot.querySelector(".dk-toast").hidden,
+    );
+    assert.equal((await read()).bottom, empty.bottom);
+
+    // Browse hides the banner and shortens the toolbar; the insets hold.
+    await page.evaluate(() => window.__touchNote.setMode("browse"));
+    const browse = await read();
+    assert.equal(browse.bannerBottom, 0);
+    assert.ok(browse.barTop > marked.barTop, "Browse toolbar is shorter");
+    assert.equal(browse.top, empty.top);
+    assert.equal(browse.bottom, empty.bottom);
+
+    // Closing the overlay frees the edges; destroy removes the properties.
+    await page.evaluate(() => window.__touchNote.setOpen(false));
+    const closed = await read();
+    assert.deepEqual([closed.top, closed.bottom], ["0px", "0px"]);
+    await page.evaluate(() => window.__touchNote.destroy());
+    const gone = await page.evaluate(() => [
+      document.documentElement.style.getPropertyValue(
+        "--dk-annotate-inset-top",
+      ),
+      document.documentElement.style.getPropertyValue(
+        "--dk-annotate-inset-bottom",
+      ),
+    ]);
+    assert.deepEqual(gone, ["", ""]);
+  } finally {
+    await context.close();
+  }
+});
+
+test("Phone: Undo and Copy toasts hide on their own and when a new mark starts, so they never sit over the page's bottom edge for long", async () => {
+  const { context, page } = await openTouchAnnotator();
+  try {
+    await page.clock.install();
+    const toastHidden = () =>
+      page.evaluate(
+        () => window.__testShadowRoot.querySelector(".dk-toast").hidden,
+      );
+    await page.touchscreen.tap(120, 220);
+    await page.waitForFunction(
+      () => window.__touchNote.getItems().length === 1,
+    );
+
+    // Undo shows a toast that hides after the default 4s.
+    await page.evaluate(() => window.__touchNote.undo());
+    assert.equal(await toastHidden(), false);
+    await page.clock.runFor(3900);
+    assert.equal(await toastHidden(), false, "still shown before 4s");
+    await page.clock.runFor(200);
+    assert.equal(await toastHidden(), true, "hidden after 4s");
+
+    // Redo's toast is dismissed by starting the next mark.
+    await page.evaluate(() => window.__touchNote.redo());
+    assert.equal(await toastHidden(), false);
+    await page.touchscreen.tap(200, 320);
+    await page.waitForFunction(
+      () => window.__touchNote.getItems().length === 2,
+    );
+    assert.equal(await toastHidden(), true, "a new mark hides the toast");
+  } finally {
+    await context.close();
+  }
+});

@@ -628,6 +628,34 @@ const OVERLAY_CSS = `
   .dk-dock:not(.dk-pip-dock) .dk-chips {
     justify-content: flex-start;
     max-width: 100%;
+    /* One row that scrolls sideways: a wrapping tray grows the docked
+       toolbar with every mark and climbs over the page (and the phone
+       drawer's foot) it is meant to leave free. */
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+  }
+  .dk-dock:not(.dk-pip-dock) .dk-chips {
+    min-height: 32px;
+  }
+  .dk-dock:not(.dk-pip-dock) .dk-chips .dk-chip {
+    flex-shrink: 0;
+    max-width: min(240px, 70vw);
+    min-height: 32px;
+    padding: 1px 2px 1px 10px;
+    font-size: 12px;
+  }
+  .dk-dock:not(.dk-pip-dock) .dk-chips .dk-chip-del {
+    min-width: 28px;
+    min-height: 28px;
+    font-size: 15px;
+  }
+  /* Keep the chips row's room while there are no marks, so the first mark
+     does not make the docked toolbar taller (32px row + the dock's 6px gap). */
+  .dk-dock:not(.dk-pip-dock) .dk-chips[hidden] + .dk-bar {
+    margin-top: 38px;
   }
   .dk-dock:not(.dk-pip-dock) .dk-toast {
     max-width: 100%;
@@ -1181,7 +1209,27 @@ export function mountAnnotator(options = {}) {
     bar,
   };
 
-  function showToast(kind, message, runUrl) {
+  // Undo, Redo and Copy toasts hide on their own: on phones the dock sits
+  // over the page's bottom edge (the drawer's foot), and a toast that stayed
+  // until dismissed would cover it. Send to Fix toasts keep their run link
+  // until dismissed. `toastAutoHideMs` lets tests and hosts change the delay
+  // (0 keeps every toast until dismissed).
+  const toastAutoHideMs =
+    typeof options.toastAutoHideMs === "number" && options.toastAutoHideMs >= 0
+      ? options.toastAutoHideMs
+      : 4000;
+  let toastTimer = null;
+  let toastAutoHides = false;
+  function showToast(kind, message, runUrl, { autoHide = false } = {}) {
+    if (toastTimer !== null) win.clearTimeout(toastTimer);
+    toastTimer = null;
+    toastAutoHides = autoHide && toastAutoHideMs > 0;
+    if (toastAutoHides) {
+      toastTimer = win.setTimeout(() => {
+        toastTimer = null;
+        hideToast();
+      }, toastAutoHideMs);
+    }
     toast.className =
       kind === "ok"
         ? "dk-toast dk-toast-ok"
@@ -1202,6 +1250,9 @@ export function mountAnnotator(options = {}) {
   }
 
   function hideToast() {
+    if (toastTimer !== null) win.clearTimeout(toastTimer);
+    toastTimer = null;
+    toastAutoHides = false;
     toast.hidden = true;
   }
 
@@ -1308,6 +1359,10 @@ export function mountAnnotator(options = {}) {
     popInput.value = item.note || "";
     popover.hidden = false;
     clampPopover(anchorX, anchorY);
+    focusNote();
+  }
+
+  function focusNote() {
     try {
       popInput.focus({ preventScroll: true });
     } catch {
@@ -1395,7 +1450,9 @@ export function mountAnnotator(options = {}) {
     if (!popover.hidden) closePopover();
     redoStack.push({ items: items.slice(), label: entry.label });
     applyHistorySnapshot(entry.items);
-    showToast("pending", `Undid: ${entry.label}`);
+    showToast("pending", `Undid: ${entry.label}`, undefined, {
+      autoHide: true,
+    });
     render();
     return true;
   }
@@ -1406,7 +1463,9 @@ export function mountAnnotator(options = {}) {
     if (!popover.hidden) closePopover();
     undoStack.push({ items: items.slice(), label: entry.label });
     applyHistorySnapshot(entry.items);
-    showToast("pending", `Redid: ${entry.label}`);
+    showToast("pending", `Redid: ${entry.label}`, undefined, {
+      autoHide: true,
+    });
     render();
     return true;
   }
@@ -1688,8 +1747,89 @@ export function mountAnnotator(options = {}) {
 
     renderCommittedShapes();
     renderMarkers();
+    publishInsets();
     options.onStateChange?.(getStateSnapshot());
   }
+
+  // How much of the viewport's top and bottom edges the overlay's own chrome
+  // covers: the Annotate mode banner at the top and the dock (chips and
+  // toolbar; not the brief toast) when it sits on the bottom edge, as it
+  // does on phones.
+  // Published as CSS custom properties on the host page's root so a host can
+  // keep content clear of them; the CodePress phone drawer pads itself by
+  // them while Annotate is on so every drawer entry can still be pinned.
+  //
+  // The values are held steady while the overlay is open: they only grow,
+  // and reset when the overlay closes, the window resizes or the dock leaves
+  // the bottom edge. Marks sit at fixed screen points, so content that moved
+  // whenever Browse hid the banner or shortened the toolbar would slide out
+  // from under its marks. Removed on destroy.
+  const INSET_TOP_VAR = "--dk-annotate-inset-top";
+  const INSET_BOTTOM_VAR = "--dk-annotate-inset-bottom";
+  let publishedInsets = "";
+  let reservedTop = 0;
+  let reservedBottom = 0;
+  let reservedForHeight = 0;
+  function dockCover(vh) {
+    if (!bar.isConnected || bar.ownerDocument !== doc || pipWindow) return 0;
+    if (bar.hidden || dockHidden) return 0;
+    let topEdge = Infinity;
+    let bottomEdge = -Infinity;
+    for (const child of dock.children) {
+      // The toast (Undo, Copy, Send to Fix) is brief: it floats over the page
+      // rather than counting toward the held inset, which would move the
+      // drawer for the rest of the session.
+      if (child.hidden || child === toast) continue;
+      const r = child.getBoundingClientRect();
+      if (r.height <= 0) continue;
+      // Margins count: the toolbar's margin reserves the chips row on phones.
+      const cs = win.getComputedStyle(child);
+      const top = r.top - (parseFloat(cs.marginTop) || 0);
+      if (top < topEdge) topEdge = top;
+      if (r.bottom > bottomEdge) bottomEdge = r.bottom;
+    }
+    // Only a dock on the bottom edge covers it; one dragged elsewhere leaves
+    // the edge free.
+    if (!Number.isFinite(topEdge) || bottomEdge < vh - 24) return 0;
+    return Math.max(0, Math.ceil(vh - topEdge));
+  }
+  function publishInsets() {
+    const rootStyle = doc.documentElement?.style;
+    if (!rootStyle) return;
+    const vh = win.innerHeight || doc.documentElement.clientHeight || 0;
+    if (destroyed || !open) {
+      reservedTop = 0;
+      reservedBottom = 0;
+    } else {
+      if (vh !== reservedForHeight) {
+        reservedForHeight = vh;
+        reservedTop = 0;
+        reservedBottom = 0;
+      }
+      if (!modeBanner.hidden && modeBanner.isConnected) {
+        const r = modeBanner.getBoundingClientRect();
+        if (r.height > 0 && r.top < vh / 2) {
+          reservedTop = Math.max(reservedTop, Math.ceil(r.bottom));
+        }
+      }
+      const cover = dockCover(vh);
+      reservedBottom = cover === 0 ? 0 : Math.max(reservedBottom, cover);
+    }
+    const key = destroyed ? "" : `${reservedTop}:${reservedBottom}`;
+    if (key === publishedInsets) return;
+    publishedInsets = key;
+    if (destroyed) {
+      rootStyle.removeProperty(INSET_TOP_VAR);
+      rootStyle.removeProperty(INSET_BOTTOM_VAR);
+      return;
+    }
+    rootStyle.setProperty(INSET_TOP_VAR, `${reservedTop}px`);
+    rootStyle.setProperty(INSET_BOTTOM_VAR, `${reservedBottom}px`);
+  }
+  const insetObserver =
+    typeof win.ResizeObserver === "function"
+      ? new win.ResizeObserver(() => publishInsets())
+      : null;
 
   // Capture-phase keyboard listener ONLY attached while Annotate mode is active
   let keydownAttached = false;
@@ -1769,6 +1909,8 @@ export function mountAnnotator(options = {}) {
 
   captureLayer.addEventListener("pointerdown", (e) => {
     if (mode !== "annotate" || !open) return;
+    // Starting a new mark dismisses a passing Undo/Redo/Copy toast.
+    if (toastAutoHides && !toast.hidden) hideToast();
     if (e.button !== 0 && e.pointerType === "mouse") return;
     const isTouchPin = e.pointerType === "touch" && tool === "pin";
     if (!isTouchPin) {
@@ -1822,8 +1964,16 @@ export function mountAnnotator(options = {}) {
     renderDraftPreview(draft);
   });
 
-  async function finalizeDraft(d) {
+  // Completing a mark runs in two parts. Everything the note sheet needs is
+  // synchronous, so the sheet opens and its field takes focus inside the
+  // pointer event that finished the mark: iOS raises the keyboard only for a
+  // focus() made while that touch's user activation is live, and an await
+  // before it (source maps, the snapshot) loses it. Source hints and the
+  // snapshot then attach to the mark when they resolve.
+  function finalizeDraft(d) {
     clearDraftSvg();
+    // A mark placed while another note is open keeps that note's text.
+    if (activePopoverItemId) saveActiveNote();
     const route = currentRoute(win);
     const viewport = currentViewport(win, doc);
     const theme = detectTheme(doc, win, options.theme);
@@ -1846,6 +1996,7 @@ export function mountAnnotator(options = {}) {
     let primaryEl = d.startEl;
     let anchorX = d.curX;
     let anchorY = d.curY;
+    let endEl = null;
 
     if (d.kind === "pin") {
       item.point = { x: d.startX, y: d.startY };
@@ -1873,25 +2024,13 @@ export function mountAnnotator(options = {}) {
       anchorX = rx + rw;
       anchorY = ry;
     } else if (d.kind === "arrow") {
-      const endEl = hitTestElement(d.curX, d.curY);
-      const fromMeta = d.startEl
-        ? await extractSourceHints(d.startEl, {
-            timeoutMs: sourceMapTimeoutMs,
-            sourceMapCache,
-          })
-        : null;
-      const toMeta = endEl
-        ? await extractSourceHints(endEl, {
-            timeoutMs: sourceMapTimeoutMs,
-            sourceMapCache,
-          })
-        : null;
+      endEl = hitTestElement(d.curX, d.curY);
       const fromRect = d.startEl?.getBoundingClientRect?.();
       const toRect = endEl?.getBoundingClientRect?.();
       item.point = { x: d.startX, y: d.startY };
       item.toPoint = { x: d.curX, y: d.curY };
       item.from = {
-        selector: fromMeta?.selector || "",
+        selector: "",
         tag: d.startEl?.tagName?.toLowerCase?.() || "",
         rect: fromRect
           ? {
@@ -1901,11 +2040,11 @@ export function mountAnnotator(options = {}) {
               height: Math.round(fromRect.height),
             }
           : { x: d.startX, y: d.startY, width: 1, height: 1 },
-        sourceHints: fromMeta?.sourceHints || [],
-        owners: fromMeta?.owners || [],
+        sourceHints: [],
+        owners: [],
       };
       item.to = {
-        selector: toMeta?.selector || "",
+        selector: "",
         tag: endEl?.tagName?.toLowerCase?.() || "",
         rect: toRect
           ? {
@@ -1915,8 +2054,8 @@ export function mountAnnotator(options = {}) {
               height: Math.round(toRect.height),
             }
           : { x: d.curX, y: d.curY, width: 1, height: 1 },
-        sourceHints: toMeta?.sourceHints || [],
-        owners: toMeta?.owners || [],
+        sourceHints: [],
+        owners: [],
       };
       anchorX = d.curX;
       anchorY = d.curY;
@@ -1967,30 +2106,105 @@ export function mountAnnotator(options = {}) {
       anchorY = d.curY;
     }
 
-    if (primaryEl) {
-      const meta = await extractSourceHints(primaryEl, {
-        timeoutMs: sourceMapTimeoutMs,
-        sourceMapCache,
-      });
-      item.selector = meta.selector;
-      item.outerHtml = meta.outerHtml;
-      item.computedStyle = meta.computedStyle;
-      item.sourceHints = meta.sourceHints;
-      item.owners = meta.owners;
+    // Start the host's screenshot before the note sheet opens, so a native
+    // capture that reads the screen right away does not include the sheet.
+    let baseShot = null;
+    if (typeof options.captureScreenshot === "function") {
+      try {
+        baseShot = Promise.resolve(options.captureScreenshot()).catch(
+          () => null,
+        );
+      } catch {
+        baseShot = null;
+      }
     }
+
+    recordHistory(`added ${describeItem(item)}`);
+    items = [...items, item];
+    persistQueue();
+    render();
+    options.onItemsChange?.(items.slice());
+    openPopoverForItem(item, anchorX, anchorY);
+
+    void enrichItem(item, d, primaryEl, endEl, baseShot);
+  }
+
+  // Applies late metadata to every copy of a mark: the live list and the
+  // undo/redo snapshots (a note saved before the metadata arrived copies it).
+  function patchItem(id, patch) {
+    const lists = [
+      items,
+      ...undoStack.map((e) => e.items),
+      ...redoStack.map((e) => e.items),
+    ];
+    let live = false;
+    for (const list of lists) {
+      for (const it of list) {
+        if (it && it.id === id) Object.assign(it, patch);
+      }
+    }
+    for (const it of items) if (it.id === id) live = true;
+    return live;
+  }
+
+  async function enrichItem(item, d, primaryEl, endEl, baseShot) {
+    const patch = {};
+    try {
+      if (d.kind === "arrow") {
+        const fromMeta = d.startEl
+          ? await extractSourceHints(d.startEl, {
+              timeoutMs: sourceMapTimeoutMs,
+              sourceMapCache,
+            })
+          : null;
+        const toMeta = endEl
+          ? await extractSourceHints(endEl, {
+              timeoutMs: sourceMapTimeoutMs,
+              sourceMapCache,
+            })
+          : null;
+        patch.from = {
+          ...item.from,
+          selector: fromMeta?.selector || "",
+          sourceHints: fromMeta?.sourceHints || [],
+          owners: fromMeta?.owners || [],
+        };
+        patch.to = {
+          ...item.to,
+          selector: toMeta?.selector || "",
+          sourceHints: toMeta?.sourceHints || [],
+          owners: toMeta?.owners || [],
+        };
+      }
+      if (primaryEl) {
+        const meta = await extractSourceHints(primaryEl, {
+          timeoutMs: sourceMapTimeoutMs,
+          sourceMapCache,
+        });
+        patch.selector = meta.selector;
+        patch.outerHtml = meta.outerHtml;
+        patch.computedStyle = meta.computedStyle;
+        patch.sourceHints = meta.sourceHints;
+        patch.owners = meta.owners;
+      }
+    } catch {
+      // Hints are best effort; the mark and its note stand without them.
+    }
+    if (destroyed) return;
+    patchItem(item.id, patch);
 
     // Immediate per-step composited callout PNG snapshot including all
     // persistent annotations currently visible on this route.
-    const currentRouteAnnotations = [
-      ...items.filter((it) => it.route === route),
-      item,
-    ];
+    const enriched = items.find((it) => it.id === item.id) || item;
+    const currentRouteAnnotations = items.some((it) => it.id === item.id)
+      ? items.filter((it) => it.route === enriched.route)
+      : [...items.filter((it) => it.route === enriched.route), enriched];
     let snapshot;
-    if (typeof options.captureScreenshot === "function") {
+    if (baseShot) {
       try {
-        const baseDataUrl = await options.captureScreenshot();
+        const baseDataUrl = await baseShot;
         if (baseDataUrl) {
-          snapshot = await compositeAnnotationsOnImage(baseDataUrl, item, {
+          snapshot = await compositeAnnotationsOnImage(baseDataUrl, enriched, {
             document: doc,
             allAnnotations: currentRouteAnnotations,
           });
@@ -1999,24 +2213,19 @@ export function mountAnnotator(options = {}) {
         snapshot = undefined;
       }
     }
+    if (destroyed) return;
     if (!snapshot) {
-      snapshot = captureCalloutSnapshot(item, {
+      snapshot = captureCalloutSnapshot(enriched, {
         document: doc,
         ignoreTag: HOST_TAG,
         allAnnotations: currentRouteAnnotations,
       });
     }
-    if (snapshot) {
-      item.snapshot = snapshot;
-    }
-
-    if (destroyed) return;
-    recordHistory(`added ${describeItem(item)}`);
-    items = [...items, item];
+    const live = patchItem(item.id, snapshot ? { snapshot } : {});
+    if (!live) return;
     persistQueue();
     render();
     options.onItemsChange?.(items.slice());
-    openPopoverForItem(item, anchorX, anchorY);
   }
 
   captureLayer.addEventListener("pointerup", (e) => {
@@ -2038,13 +2247,65 @@ export function mountAnnotator(options = {}) {
     }
     e.preventDefault();
     e.stopPropagation();
-    void finalizeDraft(completed);
+    if (e.pointerType === "touch" || completed.pointerType === "touch") {
+      compatSwallowUntil = Date.now() + COMPAT_SWALLOW_MS;
+    }
+    finalizeDraft(completed);
   });
 
   captureLayer.addEventListener("pointercancel", () => {
     draft = null;
     clearDraftSvg();
   });
+
+  // The touch that completes a mark still produces compatibility mouse
+  // events (mousedown, mouseup, click) after pointerup, because a Pin's
+  // pointerdown is left uncancelled so the page can scroll. They would land
+  // on the new marker under the finger or on the capture layer, and the
+  // mousedown would move focus off the note field the pointerup just
+  // focused. Cancelling touchend suppresses them; the capture-phase guard
+  // below catches a browser that sends them anyway.
+  const COMPAT_SWALLOW_MS = 800;
+  let compatSwallowUntil = 0;
+  function swallowingCompat() {
+    if (!compatSwallowUntil) return false;
+    if (Date.now() <= compatSwallowUntil) return true;
+    compatSwallowUntil = 0;
+    return false;
+  }
+  captureLayer.addEventListener("touchend", (e) => {
+    if (!swallowingCompat()) return;
+    if (e.cancelable) {
+      e.preventDefault();
+      compatSwallowUntil = 0;
+    }
+    // touchend is the moment iOS most reliably honours a focus() for the
+    // keyboard; refocus if anything moved focus since pointerup.
+    if (!popover.hidden && shadow.activeElement !== popInput) focusNote();
+  });
+  for (const type of ["mousedown", "mouseup", "click"]) {
+    shadow.addEventListener(
+      type,
+      (e) => {
+        if (!swallowingCompat()) return;
+        const path =
+          typeof e.composedPath === "function" ? e.composedPath() : [];
+        if (path.includes(popover)) return;
+        e.preventDefault();
+        e.stopPropagation();
+        if (type === "click") compatSwallowUntil = 0;
+      },
+      true,
+    );
+  }
+  // A new touch is a new gesture: its own compatibility events go through.
+  shadow.addEventListener(
+    "pointerdown",
+    () => {
+      compatSwallowUntil = 0;
+    },
+    true,
+  );
 
   // Draggable dock positioning + Pop-out outside the app window
   const posStorageKey = storageKey ? `${storageKey}:pos` : null;
@@ -2101,6 +2362,7 @@ export function mountAnnotator(options = {}) {
         // ignore storage errors
       }
     }
+    publishInsets();
   }
 
   function dockBackFromPip() {
@@ -2308,6 +2570,7 @@ export function mountAnnotator(options = {}) {
   function setDockHidden(nextHidden) {
     dockHidden = Boolean(nextHidden);
     dock.setAttribute("data-dk-dock-hidden", String(dockHidden));
+    publishInsets();
   }
 
   function getStateSnapshot() {
@@ -2370,6 +2633,7 @@ export function mountAnnotator(options = {}) {
     if (!popover.hidden && activePopoverItemId) {
       clampPopover(lastPopoverAnchor.x, lastPopoverAnchor.y);
     }
+    publishInsets();
   };
   const onVisualViewportChange = () => {
     if (destroyed) return;
@@ -2489,7 +2753,9 @@ export function mountAnnotator(options = {}) {
   async function copyPacket() {
     const packet = getPacket();
     const res = await dispatchRedlinePacket(packet, { document: doc });
-    showToast("ok", res.message || "Copied redline packet");
+    showToast("ok", res.message || "Copied redline packet", undefined, {
+      autoHide: true,
+    });
     return res;
   }
 
@@ -2579,10 +2845,19 @@ export function mountAnnotator(options = {}) {
     win.removeEventListener("resize", onRouteOrResize);
     win.visualViewport?.removeEventListener("resize", onVisualViewportChange);
     win.visualViewport?.removeEventListener("scroll", onVisualViewportChange);
+    insetObserver?.disconnect();
+    if (toastTimer !== null) win.clearTimeout(toastTimer);
+    toastTimer = null;
     host.remove();
+    publishedInsets = "live";
+    publishInsets();
   }
 
   container.appendChild(host);
+  insetObserver?.observe(dock);
+  insetObserver?.observe(bar);
+  insetObserver?.observe(chipsWrap);
+  insetObserver?.observe(modeBanner);
   syncListeners();
   render();
   if (dockPos) {

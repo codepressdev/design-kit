@@ -147,6 +147,12 @@ export interface AnnotatorOptions {
   initialOpen?: boolean;
   showLauncher?: boolean;
   transport?: AnnotatorTransport;
+  /**
+   * Milliseconds before an Undo, Redo or Copy toast hides on its own
+   * (default 4000; 0 keeps every toast until dismissed). Send to Fix toasts
+   * always stay until dismissed.
+   */
+  toastAutoHideMs?: number;
   /** Optional host-provided native screenshot hook returning a PNG data URL. */
   captureScreenshot?: () => Promise<string | null> | string | null;
   /** Optional host callback to pop the toolbar out into a native floating window. */
