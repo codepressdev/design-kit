@@ -13,6 +13,7 @@ import {
   loadKit,
   figureSelectorCanMatch,
   mediaMatches,
+  pageNestedSelectors,
   pageSelector,
   run,
   viewportToPixels,
@@ -370,6 +371,23 @@ test("pageSelector points :root, html and body at the stand-ins and nothing else
     ["tbody, a:root-ish", "tbody, a:root-ish"],
   ])
     assert.equal(pageSelector(from), to, from);
+});
+
+test("pageNestedSelectors points nested rules' :root at the stand-in and leaves declarations and at-rules", () => {
+  // Terminal's dark variant: a nested rule that needs :root without light-mode.
+  assert.equal(
+    pageNestedSelectors(
+      " {\n  &:where(.dark, :root:not(.light-mode) :not(.x)) { color: red; }\n}",
+    ),
+    " {\n  &:where(.dark, .cp-page-root:not(.light-mode) :not(.x)) { color: red; }\n}",
+  );
+  assert.equal(
+    pageNestedSelectors(
+      " { color: red; @media (min-width: 1px) { html & { a: b; } } }",
+    ),
+    " { color: red; @media (min-width: 1px) { cp-page-html & { a: b; } } }",
+  );
+  assert.equal(pageNestedSelectors(" { color: red; }"), " { color: red; }");
 });
 
 test("mediaMatches decides size queries against the design box and leaves the rest", () => {

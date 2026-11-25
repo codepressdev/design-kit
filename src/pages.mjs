@@ -326,6 +326,8 @@ export function mergeManifest(existing, run) {
     failed: run.failed,
     pages: run.pages,
     widths: run.widths,
+    // A capture in more than one theme says which (kit compose picks one).
+    ...(run.themes?.length > 1 ? { themes: run.themes } : {}),
   };
   const routes = run.source
     ? {

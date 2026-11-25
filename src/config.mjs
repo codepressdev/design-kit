@@ -188,6 +188,9 @@ export function resolveConfig(raw, path) {
   if (raw.pages?.startCommand && !raw.pages?.waitUrl) {
     errors.push("pages.waitUrl: is required with pages.startCommand");
   }
+  const themes = raw.pages?.themes;
+  if (Array.isArray(themes) && new Set(themes).size !== themes.length)
+    errors.push("pages.themes: names a theme twice");
   const names = new Set();
   raw.pages?.pages?.forEach((page, index) => {
     if (names.has(page?.name))
@@ -251,6 +254,7 @@ export function resolveConfig(raw, path) {
       },
       hooks: at(p.hooks),
       widths: p.widths ?? DEFAULT_PAGE_WIDTHS,
+      themes: p.themes ?? ["light"],
       fixedTime: p.fixedTime ?? DEFAULT_FIXED_TIME,
       shellReady: p.shellReady,
       layout: p.layout

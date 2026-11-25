@@ -108,8 +108,24 @@ export function compose(
      * ids can use, each repeated rule once; `full` keeps every rule.
      */
     css?: "pruned" | "full";
+    /**
+     * Called with a message when the frame's source captured each theme
+     * but not `theme`: the page is then the frame's own capture, unchanged.
+     */
+    warn?: (message: string) => void;
   },
 ): string;
+
+/**
+ * The capture `compose` uses for `theme`: for a frame captured in each theme
+ * (`theme_switch: "capture"`) the row in that theme, or its own with a
+ * `warning`; for any other frame the row with `switch: true` (the theme
+ * class is toggled).
+ */
+export function themedFrame(
+  row: Record<string, unknown>,
+  theme?: "light" | "dark",
+): { row: Record<string, unknown>; switch: boolean; warning?: string };
 
 /**
  * The stylesheet without the style rules that need a class or id missing

@@ -1612,6 +1612,47 @@ export function kitTheme(manifest) {
   };
 }
 
+/** The parts of a route row a theme variant replaces (capture-pages.mjs). */
+const THEME_VARIANT_FIELDS = [
+  "file",
+  "bytes",
+  "slots",
+  "body_class",
+  "html_attrs",
+  "body_attrs",
+];
+
+/**
+ * The capture a compose in `theme` uses. A frame whose source captured each
+ * theme (`theme_switch: "capture"`) is never re-themed by class: `theme`
+ * picks its capture in that theme (`row.theme`, or `row.variants[theme]`),
+ * and without one the frame's own capture is used as captured, with a
+ * `warning` saying so. Any other frame (`switch: true`) has its theme class
+ * toggled, as before. No `theme` keeps the frame's own capture.
+ */
+export function themedFrame(row, theme) {
+  if (row?.theme_switch !== "capture") return { row, switch: true };
+  const own = row.theme === "dark" ? "dark" : "light";
+  if (theme === undefined || theme === own) return { row, switch: false };
+  const variant = row.variants?.[theme];
+  if (
+    variant &&
+    typeof variant === "object" &&
+    typeof variant.file === "string" &&
+    /^html\/[^/]+\.html$/.test(variant.file)
+  ) {
+    const picked = { ...row, theme };
+    for (const key of THEME_VARIANT_FIELDS)
+      if (key in variant) picked[key] = variant[key];
+    return { row: picked, switch: false };
+  }
+  return {
+    row,
+    switch: false,
+    warning: `${row.id} has no ${theme} capture in this kit; composed its ${own} capture unchanged (no theme class added). Compose --theme ${own}, or fetch a newer kit.`,
+  };
+}
+
 /**
  * The captured <html>/<body> attributes (class, style, lang, dir, data-*),
  * with the theme value replaced by the one asked for when `target` is one of
@@ -1674,16 +1715,20 @@ export function compose(
   {
     frame,
     slots = [],
-    theme = "light",
+    theme,
     showNew = false,
     maxBytes = COMPOSE_MAX_BYTES,
     css: cssMode = "pruned",
+    warn = () => {},
   },
 ) {
-  const row = requireRow(kit, frame, "frame");
-  if (theme !== "light" && theme !== "dark") {
+  const found = requireRow(kit, frame, "frame");
+  if (theme !== undefined && theme !== "light" && theme !== "dark") {
     throw new KitError(`unknown theme "${theme}". Use light or dark.`);
   }
+  const picked = themedFrame(found, theme);
+  const row = picked.row;
+  if (picked.warning) warn(picked.warning);
   if (cssMode !== "pruned" && cssMode !== "full") {
     throw new KitError(`unknown css "${cssMode}". Use pruned or full.`);
   }
@@ -1740,9 +1785,13 @@ export function compose(
     ? `<script data-kit-behaviours>\n${BEHAVIOURS_JS}\n</script>\n`
     : "";
 
-  const switcher = kitTheme(kit.manifest);
+  // A frame captured in each theme keeps its capture's attributes: no
+  // target gets a theme class, so nothing re-themes half the page.
+  const kitSwitch = kitTheme(kit.manifest);
+  const switcher = picked.switch ? kitSwitch : { ...kitSwitch, targets: [] };
+  const choice = theme ?? "light";
   const sha = kit.manifest?.sha ?? "unknown";
-  const htmlAttrs = attributes(row.html_attrs, "", switcher, theme, "html", {
+  const htmlAttrs = attributes(row.html_attrs, "", switcher, choice, "html", {
     "data-kit-sha": sha,
     "data-kit-id": frame,
     lang: row.html_attrs?.lang ?? "en",
@@ -1751,7 +1800,7 @@ export function compose(
     row.body_attrs,
     row.body_class,
     switcher,
-    theme,
+    choice,
     "body",
     {},
   );
@@ -2280,6 +2329,11 @@ function showText(kit, id, full) {
     `file: ${snippetPath(kit, row)}  ${formatBytes(Buffer.byteLength(html))}`,
     ...(row.source_file ? [`source: ${row.source_file}`] : []),
     ...(row.slots?.length ? [`slots: ${row.slots.join(", ")}`] : []),
+    ...(row.theme_switch === "capture"
+      ? [
+          `themes: ${[row.theme ?? "light", ...Object.keys(row.variants ?? {})].join(", ")} (captured; compose --theme picks one)`,
+        ]
+      : []),
     "outline:",
   ].join("\n");
   const tail = "… (outline cut; --full prints the markup)";
@@ -2699,6 +2753,18 @@ export function figureSelectorCanMatch(selector, names) {
   return true;
 }
 
+/**
+ * A rule's body with its nested rules' selectors (CSS nesting, such as
+ * Tailwind's `&:where(.dark, :root:not(.light-mode) *)` variants) pointed at
+ * the stand-in elements as `pageSelector` points the rule's own. A nested
+ * at-rule's prelude is left alone.
+ */
+export function pageNestedSelectors(body) {
+  return body.replace(/(?<=^|[{};])([^{};]*)\{/g, (match, prelude) =>
+    /^\s*@/.test(prelude) ? match : `${pageSelector(prelude)}{`,
+  );
+}
+
 /** The page's CSS for inside the shadow root, plus what must sit outside. */
 function shadowCss(nodes, box, names, fonts, properties) {
   const out = [];
@@ -2710,7 +2776,9 @@ function shadowCss(nodes, box, names, fonts, properties) {
           figureSelectorCanMatch(part, names),
         )
       )
-        out.push(selector + node.text.slice(node.prelude.length));
+        out.push(
+          selector + pageNestedSelectors(node.text.slice(node.prelude.length)),
+        );
     } else if (node.type === "wrapper") {
       const inner = shadowCss(node.children, box, names, fonts, properties);
       const media = /^@media\b/i.test(node.head)
@@ -3017,7 +3085,9 @@ const USAGE = `usage: kit.mjs [--kit <dir>] <command>
   show <id> [--full]           path, size and an outline (--full: the markup)
   compose --frame <id> [--slot <name>=<file>]… [--theme light|dark] [--show-new] [--css pruned|full] --out <file>
                                --css full keeps every rule of the kit's CSS; the default
-                               keeps only rules the page's classes and ids can use
+                               keeps only rules the page's classes and ids can use;
+                               --theme uses the frame's capture in that theme when its source
+                               captured each one (show lists them), else toggles the theme class
   figure --img <file.png|jpg|webp> [--href '#cp-page:<key>'] [--caption <text>] [--alt <text>] [--width <px>] --out <file>
                                a self-contained <figure>: the image as a data URI, linked when
                                --href is given, the caption escaped (no kit needed)
@@ -3103,9 +3173,10 @@ export function run(
       const page = compose(kit, {
         frame: options.frame,
         slots,
-        theme: options.theme ?? "light",
+        theme: options.theme,
         showNew: options.showNew,
         css: options.css ?? "pruned",
+        warn: (message) => io.err(`kit: warning: ${message}`),
       });
       writeFileSync(resolve(options.out), page);
       io.out(

@@ -353,6 +353,13 @@
           "items": { "$ref": "#/$defs/size" },
           "description": "Every page is captured at each size. Default 1280x800 and 390x844."
         },
+        "themes": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "enum": ["light", "dark"] },
+          "description": "Capture every page once per colour scheme (Playwright `colorScheme`, also passed to the hooks as `theme`). With more than one, `kit compose --theme` picks the matching capture and never switches theme classes on these pages: use it for an app that themes itself in script, such as one that writes its palette inline. Default [\"light\"], with compose switching the theme class as before."
+        },
         "fixedTime": {
           "type": "string",
           "minLength": 1,

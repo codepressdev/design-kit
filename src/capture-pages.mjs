@@ -287,7 +287,7 @@ function extractPage({ slots, layoutSlots, layout, appOrigin, themeClasses }) {
   };
 }
 
-async function capturePage(context, page, viewport, run) {
+async function capturePage(context, page, viewport, theme, run) {
   const { settings, baseUrl, shotPath, hooks, themeClasses } = run;
   const tab = await context.newPage();
   try {
@@ -305,7 +305,8 @@ async function capturePage(context, page, viewport, run) {
       if (document.documentElement) add();
       else document.addEventListener("DOMContentLoaded", add, { once: true });
     }, STILL_CSS);
-    const pageHooks = (await hooks.page?.(tab, { page, viewport })) ?? {};
+    const pageHooks =
+      (await hooks.page?.(tab, { page, viewport, theme })) ?? {};
     tab.setDefaultTimeout(run.timeoutMs);
     await tab.goto(new URL(page.path, baseUrl).href, {
       waitUntil: "domcontentloaded",
@@ -366,6 +367,83 @@ async function capturePage(context, page, viewport, run) {
   } finally {
     await tab.close();
   }
+}
+
+/**
+ * A capture's file: `kitHtmlFile(id)` for light (and for every page of an
+ * unthemed capture), `….dark.html` beside it for a themed dark capture.
+ */
+export function themedHtmlFile(id, theme, themed) {
+  const file = kitHtmlFile(id);
+  return themed && theme !== "light"
+    ? file.replace(/\.html$/, `.${theme}.html`)
+    : file;
+}
+
+/** The parts of a row that differ between one page's theme captures. */
+const THEME_FIELDS = [
+  "file",
+  "bytes",
+  "slots",
+  "body_class",
+  "html_attrs",
+  "body_attrs",
+];
+
+/**
+ * One row per page and width from a themed capture: the first configured
+ * theme that was captured (light, normally) is the row itself, so ids and a
+ * compose without `--theme` stay as before, and every other theme is a
+ * `variants[<theme>]` entry with its own file and attributes. `theme` names
+ * the row's own capture and `theme_switch: "capture"` tells compose to pick
+ * a capture rather than toggle theme classes on this page.
+ */
+export function themedRows(captures, themes) {
+  const rows = [];
+  for (const byTheme of captures.values()) {
+    const taken = themes.filter((theme) => byTheme[theme]);
+    if (!taken.length) continue;
+    const [primary, ...others] = taken;
+    const variants = {};
+    for (const theme of others) {
+      variants[theme] = Object.fromEntries(
+        THEME_FIELDS.map((key) => [key, byTheme[theme][key]]),
+      );
+    }
+    rows.push({
+      ...byTheme[primary],
+      theme: primary,
+      theme_switch: "capture",
+      ...(others.length ? { variants } : {}),
+    });
+  }
+  return rows;
+}
+
+/**
+ * One gap row per page and width: a frame that failed in more than one
+ * theme lists them all in `themes` (with the first failure's reason), so
+ * gaps.json never holds two rows with one id.
+ */
+export function themedGaps(gaps) {
+  const byId = new Map();
+  for (const gap of gaps) {
+    const seen = byId.get(gap.id);
+    if (seen) seen.themes = [...(seen.themes ?? []), ...(gap.themes ?? [])];
+    else byId.set(gap.id, { ...gap });
+  }
+  return [...byId.values()];
+}
+
+/** Every markup file a route row names: its own and its theme variants'. */
+export function rowFiles(row) {
+  const variants =
+    row && typeof row.variants === "object" && row.variants
+      ? Object.values(row.variants)
+      : [];
+  return [row?.file, ...variants.map((variant) => variant?.file)].filter(
+    (file) => typeof file === "string",
+  );
 }
 
 /** The classes the capture strips from <html>/<body>: compose sets them. */
@@ -474,6 +552,11 @@ export async function capturePages(config, options = {}) {
     ...(options.forbidStrings ?? []),
   ]);
   const themeClasses = themeClassesOf(config.theme);
+  // More than one theme: every page is captured once per colour scheme and
+  // compose picks the capture (see themedRows).
+  const themes = settings.themes?.length ? settings.themes : ["light"];
+  const themed = themes.length > 1;
+  const captures = new Map();
 
   const stops = [];
   const shutdown = async () => {
@@ -542,158 +625,169 @@ export async function capturePages(config, options = {}) {
 
     for (const viewport of settings.widths) {
       for (const page of pages) {
-        if (session.interrupted) return 130;
-        if (page.widths && !page.widths.includes(viewport.width)) continue;
-        const id = kitRouteId(page.name, viewport.width);
-        const context = await session.browser.newContext({
-          baseURL: baseUrl,
-          viewport: { width: viewport.width, height: viewport.height },
-          deviceScaleFactor: 1,
-          timezoneId: "UTC",
-          locale: "en-US",
-          colorScheme: "light",
-          reducedMotion: "reduce",
-          ...(storageState ? { storageState } : {}),
-        });
-        current = context;
-        let cleanup = null;
-        const pageStart = performance.now();
-        try {
-          cleanup =
-            (await hooks.context?.(context, { page, viewport })) ?? null;
-          const shotPath = path.join(
-            shotsDir,
-            `${path.basename(kitHtmlFile(id), ".html")}.png`,
-          );
-          const capture = await capturePage(context, page, viewport, {
-            settings,
-            baseUrl,
-            shotPath,
-            hooks,
-            themeClasses,
-            timeoutMs,
-            screenshots: Boolean(options.screenshots),
+        for (const theme of themes) {
+          if (session.interrupted) return 130;
+          if (page.widths && !page.widths.includes(viewport.width)) continue;
+          const id = kitRouteId(page.name, viewport.width);
+          const label = themed ? `${id} (${theme})` : id;
+          const context = await session.browser.newContext({
+            baseURL: baseUrl,
+            viewport: { width: viewport.width, height: viewport.height },
+            deviceScaleFactor: 1,
+            timezoneId: "UTC",
+            locale: "en-US",
+            colorScheme: theme,
+            reducedMotion: "reduce",
+            ...(storageState ? { storageState } : {}),
           });
-          if (!capture.slots.includes("main"))
-            throw new Error(
-              `no non-empty main slot in the ${capture.layout} layout`,
+          current = context;
+          let cleanup = null;
+          const pageStart = performance.now();
+          try {
+            cleanup =
+              (await hooks.context?.(context, { page, viewport, theme })) ??
+              null;
+            const file = themedHtmlFile(id, theme, themed);
+            const shotPath = path.join(
+              shotsDir,
+              `${path.basename(file, ".html")}.png`,
+            );
+            const capture = await capturePage(context, page, viewport, theme, {
+              settings,
+              baseUrl,
+              shotPath,
+              hooks,
+              themeClasses,
+              timeoutMs,
+              screenshots: Boolean(options.screenshots),
+            });
+            if (!capture.slots.includes("main"))
+              throw new Error(
+                `no non-empty main slot in the ${capture.layout} layout`,
+              );
+
+            let html = capture.html;
+            for (const url of new Set(capture.images)) {
+              const data = await inliner.inline(url);
+              html = html.replace(
+                new RegExp(
+                  `(src|href)="${escapeRegExp(url.replace(/&/g, "&amp;"))}"`,
+                  "g",
+                ),
+                data ? `$1="${data}"` : `$1=""`,
+              );
+            }
+            // No capture-time origin or port survives into the kit, and React's
+            // timing-dependent ids are renumbered.
+            html = normalizeReactIds(html).replaceAll(appOrigin, "");
+            for (const origin of options.stripOrigins ?? [])
+              html = html.replaceAll(origin, "");
+            html = html.replaceAll(
+              `http://127.0.0.1:${new URL(appOrigin).port}`,
+              "",
             );
 
-          let html = capture.html;
-          for (const url of new Set(capture.images)) {
-            const data = await inliner.inline(url);
-            html = html.replace(
-              new RegExp(
-                `(src|href)="${escapeRegExp(url.replace(/&/g, "&amp;"))}"`,
-                "g",
+            const found = findForbidden(
+              [
+                html,
+                // The words text.json will hold, entities decoded.
+                visibleText(html),
+                JSON.stringify(capture.htmlAttrs),
+                JSON.stringify(capture.bodyAttrs),
+              ].join("\n"),
+              needles,
+            );
+            if (found) throw new ForbiddenStringError();
+
+            // CSS assets on the app origin (other than fonts) are inlined.
+            const inlined = new Map();
+            for (const sheet of capture.sheets) {
+              const base = sheet.href ?? new URL(page.path, appOrigin).href;
+              for (const rule of sheet.rules)
+                for (const url of cssUrls(rule, base)) {
+                  const parsed = new URL(url);
+                  if (
+                    parsed.origin !== appOrigin ||
+                    isFontUrl(parsed, settings.fontsPath)
+                  )
+                    continue;
+                  const data = await inliner.inline(url);
+                  if (data) inlined.set(url, data);
+                }
+            }
+            css.add(capture.sheets, (rule, href) =>
+              rewriteCssUrls(
+                rule,
+                href ?? new URL(page.path, appOrigin).href,
+                appOrigin,
+                inlined,
+                { fontsPath: settings.fontsPath, fonts: fontUrls },
               ),
-              data ? `$1="${data}"` : `$1=""`,
             );
-          }
-          // No capture-time origin or port survives into the kit, and React's
-          // timing-dependent ids are renumbered.
-          html = normalizeReactIds(html).replaceAll(appOrigin, "");
-          for (const origin of options.stripOrigins ?? [])
-            html = html.replaceAll(origin, "");
-          html = html.replaceAll(
-            `http://127.0.0.1:${new URL(appOrigin).port}`,
-            "",
-          );
-
-          const found = findForbidden(
-            [
-              html,
-              // The words text.json will hold, entities decoded.
-              visibleText(html),
-              JSON.stringify(capture.htmlAttrs),
-              JSON.stringify(capture.bodyAttrs),
-            ].join("\n"),
-            needles,
-          );
-          if (found) throw new ForbiddenStringError();
-
-          // CSS assets on the app origin (other than fonts) are inlined.
-          const inlined = new Map();
-          for (const sheet of capture.sheets) {
-            const base = sheet.href ?? new URL(page.path, appOrigin).href;
-            for (const rule of sheet.rules)
-              for (const url of cssUrls(rule, base)) {
-                const parsed = new URL(url);
-                if (
-                  parsed.origin !== appOrigin ||
-                  isFontUrl(parsed, settings.fontsPath)
-                )
-                  continue;
-                const data = await inliner.inline(url);
-                if (data) inlined.set(url, data);
-              }
-          }
-          css.add(capture.sheets, (rule, href) =>
-            rewriteCssUrls(
-              rule,
-              href ?? new URL(page.path, appOrigin).href,
-              appOrigin,
-              inlined,
-              { fontsPath: settings.fontsPath, fonts: fontUrls },
-            ),
-          );
-          if (settings.copyFonts) {
-            for (const [url, name] of fontUrls) {
-              if (fontFiles.has(name)) continue;
-              try {
-                const { response, body } = await inliner.fetch(url);
-                if (response.ok()) fontFiles.set(name, body);
-              } catch {
-                // A font that cannot be fetched stays out; compose drops it.
+            if (settings.copyFonts) {
+              for (const [url, name] of fontUrls) {
+                if (fontFiles.has(name)) continue;
+                try {
+                  const { response, body } = await inliner.fetch(url);
+                  if (response.ok()) fontFiles.set(name, body);
+                } catch {
+                  // A font that cannot be fetched stays out; compose drops it.
+                }
               }
             }
-          }
 
-          const file = kitHtmlFile(id);
-          files.set(file, html);
-          rows.push({
-            id,
-            kind: "route",
-            title: `${page.title ?? page.name} (${viewport.width})`,
-            file,
-            width: viewport.width,
-            height: viewport.height,
-            bytes: Buffer.byteLength(html),
-            slots: [...capture.slots].sort(),
-            ...(page.sourceFile ? { source_file: page.sourceFile } : {}),
-            ...(source ? { source, css: routeCssFile(source) } : {}),
-            path: page.path,
-            body_class: capture.bodyAttrs.class ?? "",
-            html_attrs: capture.htmlAttrs,
-            body_attrs: capture.bodyAttrs,
-          });
-          log(
-            `captured ${id} (${capture.layout}, slots ${capture.slots.join(",")}, ${Math.round(Buffer.byteLength(html) / 1024)} KB, ${((performance.now() - pageStart) / 1000).toFixed(1)}s)`,
-          );
-        } catch (error) {
-          if (error instanceof ForbiddenStringError) {
-            leaks.push(id);
-            log(`${id}: ${error.message}`);
-            continue;
+            files.set(file, html);
+            const row = {
+              id,
+              kind: "route",
+              title: `${page.title ?? page.name} (${viewport.width})`,
+              file,
+              width: viewport.width,
+              height: viewport.height,
+              bytes: Buffer.byteLength(html),
+              slots: [...capture.slots].sort(),
+              ...(page.sourceFile ? { source_file: page.sourceFile } : {}),
+              ...(source ? { source, css: routeCssFile(source) } : {}),
+              path: page.path,
+              body_class: capture.bodyAttrs.class ?? "",
+              html_attrs: capture.htmlAttrs,
+              body_attrs: capture.bodyAttrs,
+            };
+            if (themed) {
+              if (!captures.has(id)) captures.set(id, {});
+              captures.get(id)[theme] = row;
+            } else rows.push(row);
+            log(
+              `captured ${label} (${capture.layout}, slots ${capture.slots.join(",")}, ${Math.round(Buffer.byteLength(html) / 1024)} KB, ${((performance.now() - pageStart) / 1000).toFixed(1)}s)`,
+            );
+          } catch (error) {
+            if (error instanceof ForbiddenStringError) {
+              leaks.push(label);
+              log(`${label}: ${error.message}`);
+              continue;
+            }
+            const reason = String(error?.message ?? error)
+              .split("\n")
+              .slice(0, 3)
+              .join(" ");
+            gaps.push({
+              id,
+              route: page.name,
+              ...(source ? { source } : {}),
+              ...(themed ? { themes: [theme] } : {}),
+              reason,
+            });
+            log(`gap ${label}: ${reason}`);
+          } finally {
+            await cleanup?.().catch?.(() => {});
+            await context.close();
+            current = null;
           }
-          const reason = String(error?.message ?? error)
-            .split("\n")
-            .slice(0, 3)
-            .join(" ");
-          gaps.push({
-            id,
-            route: page.name,
-            ...(source ? { source } : {}),
-            reason,
-          });
-          log(`gap ${id}: ${reason}`);
-        } finally {
-          await cleanup?.().catch?.(() => {});
-          await context.close();
-          current = null;
         }
       }
     }
+    rows.push(...themedRows(captures, themes));
+    if (themed) gaps.splice(0, gaps.length, ...themedGaps(gaps));
     timings.capture_s = (performance.now() - captureStart) / 1000;
   } finally {
     await shutdown();
@@ -720,6 +814,7 @@ export async function capturePages(config, options = {}) {
     configDir: config.configDir,
     source,
     pageNames,
+    themes,
   });
   timings.total_s = (performance.now() - startedAt) / 1000;
   const cpu = process.cpuUsage();
@@ -754,6 +849,7 @@ export function writePagesKit(
     configDir,
     source = null,
     pageNames = new Set(pages.map((page) => page.name)),
+    themes = ["light"],
   },
 ) {
   const owns = (row) => ownsRouteRow(row, { source, pageNames });
@@ -806,7 +902,7 @@ export function writePagesKit(
     const stale = new Set(
       (Array.isArray(existingRows) ? existingRows : [])
         .filter((row) => row && typeof row === "object" && owns(row))
-        .map((row) => row.file)
+        .flatMap(rowFiles)
         .filter(
           (file) =>
             typeof file === "string" &&
@@ -819,7 +915,7 @@ export function writePagesKit(
       if (!isRouteHtmlFile(name)) continue;
       const page = name
         .replace(/^route(?:--|:)/, "")
-        .replace(/@\d+\.html$/, "");
+        .replace(/@\d+(?:\.(?:light|dark))?\.html$/, "");
       if (pageNames.has(page)) stale.add(`html/${name}`);
     }
     for (const file of stale) fs.rmSync(path.join(out, file), { force: true });
@@ -868,6 +964,7 @@ export function writePagesKit(
     pages: pages.map((page) => page.name),
     widths: widths.map((viewport) => viewport.width),
     theme,
+    themes,
     source,
     total: {
       captured: sortedRows.length,

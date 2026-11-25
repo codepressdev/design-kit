@@ -316,7 +316,8 @@ How the app switches to dark: a class (`"attribute": "class"`, the default,
 `dark` on `<html>` and `<body>`) or an attribute such as `data-theme` on
 `<html>`. Leave `light` out when light is simply the dark value's absence. The
 captures record the theme in the kit's manifest, so `kit compose --theme dark`
-needs no config.
+needs no config. Pages captured in each theme (`pages.themes`) are never
+re-themed by this switch.
 
 ### `stories`
 
@@ -371,6 +372,12 @@ export returns (`async ({ browser, baseUrl, config }) => state`).
   before the capture starts and again before it writes. To move a page from
   one source to another, rebuild the kit without the old source's rows.
 - `widths`: the sizes every page is captured at (default 1280×800 and 390×844).
+- `themes`: the colour schemes every page is captured in (default
+  `["light"]`). With `["light", "dark"]` each page is captured twice, with
+  Playwright's `colorScheme` set and `theme` passed to the hooks, and `kit
+compose --theme` picks the capture instead of toggling the theme class. Use
+  it for an app that themes itself in script, such as one that writes its
+  palette into `<html style>` (Terminal does).
 - `shellReady`: a selector the app's frame shows before any page content. A
   page's own `shellReady` replaces it for that page; `false` skips the wait,
   for a page drawn outside the frame (a public page such as a blog).
@@ -519,6 +526,7 @@ design-kit/
   routes.json     page rows
   text.json       {id: the row's visible text, first 600 characters}
   html/story--<id>@<w>.html, html/route--<name>@<w>.html
+  html/route--<name>@<w>.dark.html  the dark capture of a page source with themes
   css/stories.css every rule the Storybook preview loaded, deduplicated
   css/routes.css  every rule the captured pages loaded, deduplicated
   css/routes--<source>.css  the same, for the pages of one page source
@@ -535,7 +543,17 @@ stylesheet in `css`. Ids are
 instead of `:`, so the kit uploads as a CI artifact as it is. Always find a
 row's markup through its `file`. `manifest.css` may name another stylesheet
 per source (`{stories, routes}`). With page sources, `manifest.sources.routes`
-keeps the kit's totals and adds `page_sources.<source>` with each one's own.
+keeps the kit's totals and adds `page_sources.<source>` with each one's own,
+and `themes` when that source captured more than one.
+
+A page of a source that captures each theme carries `theme` (the theme of
+the row's own capture, light unless light failed), `theme_switch: "capture"`
+and `variants: {dark: {file, bytes, slots, body_class, html_attrs,
+body_attrs}}`. The id stays `route:<name>@<width>`; `compose --theme dark` uses
+the dark variant, and a page without one is composed as captured with a
+warning on stderr (exit 0), never with a theme class its app does not use. A
+page of such a source that failed has one gaps.json row whose `themes` lists
+the themes it failed in.
 
 ## `kit.mjs`
 
@@ -631,7 +649,8 @@ reads them. The one exception is your own code: an inline `<script>` (no
 `src`) in a `--slot` fragment file is kept in place, with only its `type` and
 `id`. Nothing executable from the kit's captured markup survives, a fragment's
 `<script src>` is removed, and `on…=` handlers are removed everywhere, your
-fragments included. `--theme dark` applies the manifest's theme. Elements marked
+fragments included. `--theme dark` applies the manifest's theme, or, for a
+page captured in each theme, uses its dark capture. Elements marked
 `data-kit-new` get a visible outline with `--show-new`, and behaviour triggers
 (below) a blue one. An unknown frame, slot
 or snippet id exits 2, naming near matches. `--kit <dir>` (or

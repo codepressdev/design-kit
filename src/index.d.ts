@@ -43,6 +43,8 @@ export interface DesignKitConfig {
     baseUrl?: string;
     fixedTime: string;
     widths: Size[];
+    /** The colour schemes each page is captured in. Default ["light"]. */
+    themes: ("light" | "dark")[];
     pages: PageConfig[];
     [key: string]: unknown;
   };
@@ -80,6 +82,8 @@ export interface PageHookResult {
 export interface CaptureHookInfo {
   page: PageConfig;
   viewport: Size;
+  /** The colour scheme this capture runs in (one of `pages.themes`). */
+  theme: "light" | "dark";
 }
 
 export interface CapturePagesOptions {
