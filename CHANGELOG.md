@@ -1,5 +1,11 @@
 # @codepress/design-kit
 
+## 0.20.0
+
+### Minor Changes
+
+- 6e9da2d: `capture pages` can capture every page in each colour scheme (`pages.themes`, such as `["light", "dark"]`), recording each page's dark capture as a variant of its row. `kit compose --theme` then picks the capture in that theme instead of toggling the theme class, so an app that writes its palette inline is never composed half light and half dark. A frame with no capture in the asked theme is composed as captured, with one warning on stderr and exit 0. Frames of a source that captures one theme, and compose without `--theme`, are unchanged.
+
 ## 0.19.2
 
 ### Patch Changes
