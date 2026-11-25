@@ -989,6 +989,29 @@ function viewportFor(declared) {
   return NAMED_VIEWPORTS[declared.name] ?? null;
 }
 
+/**
+ * Why a Storybook build cannot be captured as a kit: it was built from a
+ * subset of the stories (CodePress's packages/ui writes
+ * `codepress-story-set.json` beside `index.json`, packages/ui/scripts/story-set.mjs).
+ * A kit captured from it would drop every story the subset left out, so it is
+ * refused, never captured. Null for a full build or a build with no record.
+ */
+export function subsetBuildProblem(buildDir) {
+  let record;
+  try {
+    record = JSON.parse(
+      readFileSync(join(buildDir, "codepress-story-set.json"), "utf8"),
+    );
+  } catch {
+    return null;
+  }
+  if (!record || record.set !== "subset") return null;
+  const what = Array.isArray(record.files)
+    ? `${record.files.length} stories file(s)`
+    : `the glob ${record.glob}`;
+  return `${buildDir} is a Storybook build of a subset of the stories (${what}, from ${record.source}); the design kit captures only a full build. Rebuild it with the story-list variables unset.`;
+}
+
 function storybookStories(buildDir) {
   const index = JSON.parse(readFileSync(join(buildDir, "index.json"), "utf8"));
   return Object.values(index.entries ?? {})
@@ -1166,6 +1189,9 @@ export async function captureStories(config, options = {}) {
         `no Storybook static build${buildDir ? ` at ${buildDir} (it has no index.json)` : ""}: pass --storybook-dir, or set stories.buildCommand and stories.staticDir`,
       );
     }
+
+    const partial = subsetBuildProblem(buildDir);
+    if (partial) throw new Error(partial);
 
     const stories = storybookStories(buildDir);
     const only = options.only ? new Set(options.only) : null;
