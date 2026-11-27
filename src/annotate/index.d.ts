@@ -58,11 +58,32 @@ export interface OverlapPair {
 }
 
 export interface SnapshotImage {
+  /** A PNG data URL, at most 1 MiB. */
   dataUrl: string;
+  /** Image pixels; wider than the CSS viewport when taken at device pixel ratio. */
   width: number;
   height: number;
   byteLength: number;
   crossOriginPlaceholders: number;
+  /**
+   * What drew the page beneath the callouts: the host's `captureScreenshot`
+   * image ("host"), the browser rendering the DOM ("browser"), or the hand
+   * painter fallback ("painter"). Not carried into a sanitized packet.
+   */
+  renderer?: "host" | "browser" | "painter";
+}
+
+/** What the overlay hands a host's `captureScreenshot`. */
+export interface CaptureScreenshotContext {
+  /**
+   * The overlay's `<design-kit-annotator>` element. The overlay sets it to
+   * `opacity: 0` from the call until the returned image settles (or
+   * `captureScreenshotTimeoutMs` passes), so a capture of any frame painted
+   * after the call has no marks, toolbar or note in it. A host that reads a
+   * frame already on screen when it is called must leave this element out
+   * itself.
+   */
+  overlay: HTMLElement;
 }
 
 export interface TargetMetadata {
@@ -153,8 +174,29 @@ export interface AnnotatorOptions {
    * always stay until dismissed.
    */
   toastAutoHideMs?: number;
-  /** Optional host-provided native screenshot hook returning a PNG data URL. */
-  captureScreenshot?: () => Promise<string | null> | string | null;
+  /**
+   * Optional host-provided native capture of the viewport beneath the
+   * overlay, called once per new mark before its note opens. Return a PNG
+   * data URL of the page at any resolution (device pixels are kept, within
+   * the 1 MiB cap) without the overlay (see `CaptureScreenshotContext`); the
+   * overlay draws every callout on it once. Return null, throw, or reject to
+   * fall back to the overlay's DOM capture.
+   */
+  captureScreenshot?: (
+    context: CaptureScreenshotContext,
+  ) => Promise<string | null> | string | null;
+  /**
+   * Milliseconds the overlay waits for `captureScreenshot` (default 3000).
+   * Past it the overlay shows again and uses its DOM capture; a later image
+   * is ignored.
+   */
+  captureScreenshotTimeoutMs?: number;
+  /**
+   * Milliseconds the browser-rendered DOM capture may take (default 1500)
+   * before the overlay falls back to its hand painter. 0 always uses the
+   * painter.
+   */
+  snapshotTimeoutMs?: number;
   /** Optional host callback to pop the toolbar out into a native floating window. */
   onPopOut?: (coords: { screenX?: number; screenY?: number }) => void;
   /** Optional callback fired whenever toolbar state (mode, tool, count, toast, history) changes. */
@@ -307,10 +349,33 @@ export function extractComputedLayout(
   el: unknown,
 ): Record<string, string> | undefined;
 
+/** The hand painter: draws the viewport from computed styles at <= 1x. */
 export function captureCalloutSnapshot(
-  annotation: Partial<RedlineItem>,
-  options?: { document?: Document; ignoreTag?: string },
+  annotation: Partial<RedlineItem> | null,
+  options?: {
+    document?: Document;
+    ignoreTag?: string;
+    allAnnotations?: Array<Partial<RedlineItem>>;
+  },
 ): SnapshotImage | undefined;
+
+/**
+ * The browser renders the viewport DOM (SVG foreignObject) at device pixel
+ * ratio, at most 3x, leaving out `ignoreTag` (the overlay); callouts are
+ * drawn on top once. Falls back to `captureCalloutSnapshot` on any error, a
+ * tainted canvas, or `timeoutMs` (default 1500). Never rejects.
+ */
+export function captureViewportSnapshot(
+  annotation: Partial<RedlineItem> | null,
+  options?: {
+    document?: Document;
+    ignoreTag?: string;
+    allAnnotations?: Array<Partial<RedlineItem>>;
+    timeoutMs?: number;
+    /** Pixel ratio to render at; defaults to `devicePixelRatio`. */
+    scale?: number;
+  },
+): Promise<SnapshotImage | undefined>;
 
 export function sanitizeRunUrl(rawUrl: unknown): string | undefined;
 

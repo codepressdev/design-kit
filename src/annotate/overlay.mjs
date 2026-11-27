@@ -11,7 +11,7 @@ import {
   sanitizeRoute,
 } from "./sanitize.mjs";
 import {
-  captureCalloutSnapshot,
+  captureViewportSnapshot,
   compositeAnnotationsOnImage,
 } from "./snapshot.mjs";
 import {
@@ -27,6 +27,25 @@ import {
 } from "./transport.mjs";
 
 const HOST_TAG = "design-kit-annotator";
+// The open overlay for each storage key. A closed overlay whose mark is
+// still being captured hands its late results to the open one, which holds
+// the restored queue in memory and would otherwise overwrite storage.
+const liveOverlaysByStorageKey = new Map();
+// Snapshots still being taken for each storage key's queue, whichever overlay
+// started them, so Send in a reopened overlay waits for a closed one's marks.
+const pendingEnrichmentsByStorageKey = new Map();
+function pendingEnrichmentsFor(storageKey) {
+  if (!storageKey) return new Set();
+  let pending = pendingEnrichmentsByStorageKey.get(storageKey);
+  if (!pending) {
+    pending = new Set();
+    pendingEnrichmentsByStorageKey.set(storageKey, pending);
+  }
+  return pending;
+}
+// How long the overlay stays hidden waiting for a host's captureScreenshot
+// before it shows again and uses its own DOM capture instead.
+const DEFAULT_HOST_CAPTURE_TIMEOUT_MS = 3000;
 const DEFAULT_STORAGE_KEY = "design-kit:annotate:queue:v1";
 const MAX_HISTORY_STEPS = 100;
 
@@ -875,6 +894,9 @@ export function mountAnnotator(options = {}) {
   const sourceMapTimeoutMs =
     options.sourceMapTimeoutMs ?? DEFAULT_SOURCEMAP_TIMEOUT_MS;
   const sourceMapCache = new Map();
+  const snapshotTimeoutMs = options.snapshotTimeoutMs;
+  const captureScreenshotTimeoutMs =
+    options.captureScreenshotTimeoutMs ?? DEFAULT_HOST_CAPTURE_TIMEOUT_MS;
 
   let mode = options.initialMode === "annotate" ? "annotate" : "browse";
   let tool =
@@ -911,6 +933,17 @@ export function mountAnnotator(options = {}) {
       // ignore storage errors
     }
   }
+
+  // Late hints and snapshot from an overlay closed while it captured.
+  function applyLatePatch(id, patch) {
+    if (destroyed) return false;
+    if (!patchItem(id, patch)) return true;
+    persistQueue();
+    render();
+    options.onItemsChange?.(items.slice());
+    return true;
+  }
+  if (storageKey) liveOverlaysByStorageKey.set(storageKey, applyLatePatch);
 
   function persistQueue() {
     if (!storageKey) return;
@@ -2106,18 +2139,10 @@ export function mountAnnotator(options = {}) {
       anchorY = d.curY;
     }
 
-    // Start the host's screenshot before the note sheet opens, so a native
-    // capture that reads the screen right away does not include the sheet.
-    let baseShot = null;
-    if (typeof options.captureScreenshot === "function") {
-      try {
-        baseShot = Promise.resolve(options.captureScreenshot()).catch(
-          () => null,
-        );
-      } catch {
-        baseShot = null;
-      }
-    }
+    // Start the host's screenshot before the note sheet opens. The overlay
+    // hides itself until the image arrives, so the base holds the page only
+    // and the callouts are drawn on it once, by compositeAnnotationsOnImage.
+    const baseShot = startHostCapture();
 
     recordHistory(`added ${describeItem(item)}`);
     items = [...items, item];
@@ -2126,7 +2151,83 @@ export function mountAnnotator(options = {}) {
     options.onItemsChange?.(items.slice());
     openPopoverForItem(item, anchorX, anchorY);
 
-    void enrichItem(item, d, primaryEl, endEl, baseShot);
+    const enrichment = enrichItem(item, d, primaryEl, endEl, baseShot).catch(
+      () => {},
+    );
+    pendingEnrichments.add(enrichment);
+    void enrichment.finally(() => pendingEnrichments.delete(enrichment));
+  }
+
+  // Host captures in flight; the overlay is hidden while any is.
+  let hostCapturesPending = 0;
+  // Source hints and snapshots still being gathered for new marks. Each step
+  // is bounded by its own timeout, so Send to Fix can wait for them.
+  const pendingEnrichments = pendingEnrichmentsFor(storageKey);
+
+  function setHiddenForCapture(hidden) {
+    if (hidden) {
+      host.style.setProperty("opacity", "0", "important");
+      host.style.setProperty("transition", "none", "important");
+    } else {
+      host.style.removeProperty("opacity");
+      host.style.removeProperty("transition");
+    }
+  }
+
+  function startHostCapture() {
+    if (typeof options.captureScreenshot !== "function") return null;
+    hostCapturesPending += 1;
+    setHiddenForCapture(true);
+    let timer = null;
+    const settle = () => {
+      if (timer !== null) win.clearTimeout(timer);
+      timer = null;
+      hostCapturesPending = Math.max(0, hostCapturesPending - 1);
+      if (hostCapturesPending === 0 && !destroyed) setHiddenForCapture(false);
+    };
+    let shot;
+    try {
+      shot = Promise.resolve(options.captureScreenshot({ overlay: host }));
+    } catch {
+      shot = Promise.resolve(null);
+    }
+    const timeout = new Promise((resolve) => {
+      timer = win.setTimeout(() => resolve(null), captureScreenshotTimeoutMs);
+    });
+    // A shot that arrives after the timeout may show the overlay again, so
+    // it is dropped in favour of the DOM capture.
+    return Promise.race([shot.catch(() => null), timeout]).then(
+      (value) => {
+        settle();
+        return typeof value === "string" && value ? value : null;
+      },
+      () => {
+        settle();
+        return null;
+      },
+    );
+  }
+
+  // Writes late metadata into the stored queue's copy of one mark, leaving
+  // every other stored mark (possibly a newer overlay's) as it is.
+  function patchStoredItem(id, patch) {
+    if (!storageKey) return;
+    try {
+      const saved = win.sessionStorage?.getItem(storageKey);
+      const stored = saved ? JSON.parse(saved) : null;
+      if (!Array.isArray(stored)) return;
+      const target = stored.find((it) => it && it.id === id);
+      if (!target) return;
+      Object.assign(target, patch);
+      try {
+        win.sessionStorage.setItem(storageKey, JSON.stringify(stored));
+      } catch {
+        delete target.snapshot;
+        win.sessionStorage.setItem(storageKey, JSON.stringify(stored));
+      }
+    } catch {
+      // ignore storage errors
+    }
   }
 
   // Applies late metadata to every copy of a mark: the live list and the
@@ -2190,7 +2291,6 @@ export function mountAnnotator(options = {}) {
     } catch {
       // Hints are best effort; the mark and its note stand without them.
     }
-    if (destroyed) return;
     patchItem(item.id, patch);
 
     // Immediate per-step composited callout PNG snapshot including all
@@ -2213,13 +2313,25 @@ export function mountAnnotator(options = {}) {
         snapshot = undefined;
       }
     }
-    if (destroyed) return;
     if (!snapshot) {
-      snapshot = captureCalloutSnapshot(enriched, {
+      snapshot = await captureViewportSnapshot(enriched, {
         document: doc,
         ignoreTag: HOST_TAG,
         allAnnotations: currentRouteAnnotations,
+        timeoutMs: snapshotTimeoutMs,
       });
+    }
+    if (destroyed) {
+      // The overlay closed while this mark's hints and image were gathered.
+      // Its queue stays in storage and comes back on the next mount: an
+      // overlay already open on that queue takes the results, otherwise
+      // they go into the stored copy of this one mark.
+      const latePatch = snapshot ? { ...patch, snapshot } : patch;
+      const open = storageKey && liveOverlaysByStorageKey.get(storageKey);
+      if (!open || !open(item.id, latePatch)) {
+        patchStoredItem(item.id, latePatch);
+      }
+      return;
     }
     const live = patchItem(item.id, snapshot ? { snapshot } : {});
     if (!live) return;
@@ -2767,6 +2879,16 @@ export function mountAnnotator(options = {}) {
     render();
     showToast("pending", "Sending…");
 
+    // A mark made just before Send still gets its snapshot in the packet.
+    // A mark made while waiting adds its own enrichment; wait for it too.
+    while (pendingEnrichments.size > 0) {
+      await Promise.allSettled(Array.from(pendingEnrichments));
+    }
+    if (destroyed) {
+      sending = false;
+      return null;
+    }
+
     const packet = getPacket();
     try {
       const res = await dispatchRedlinePacket(packet, {
@@ -2837,6 +2959,12 @@ export function mountAnnotator(options = {}) {
   function destroy() {
     if (destroyed) return;
     destroyed = true;
+    if (
+      storageKey &&
+      liveOverlaysByStorageKey.get(storageKey) === applyLatePatch
+    ) {
+      liveOverlaysByStorageKey.delete(storageKey);
+    }
     dockBackFromPip();
     syncListeners();
     controlBridge?.destroy();

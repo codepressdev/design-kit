@@ -46,6 +46,7 @@ var api = {
   computePairwiseOverlaps: computePairwiseOverlaps,
   extractSourceHints: extractSourceHints,
   captureCalloutSnapshot: captureCalloutSnapshot,
+  captureViewportSnapshot: captureViewportSnapshot,
   createPostMessageBridge: createPostMessageBridge,
   dispatchRedlinePacket: dispatchRedlinePacket
 };

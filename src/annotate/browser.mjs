@@ -27,7 +27,10 @@ export {
   resolveSourceMapPosition,
   trimOuterHtml,
 } from "./source-hints.mjs";
-export { captureCalloutSnapshot } from "./snapshot.mjs";
+export {
+  captureCalloutSnapshot,
+  captureViewportSnapshot,
+} from "./snapshot.mjs";
 export {
   createPostMessageBridge,
   DEFAULT_POSTMESSAGE_TIMEOUT_MS,

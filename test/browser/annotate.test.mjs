@@ -15,7 +15,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { after, before, test } from "node:test";
 
-import { chromium } from "@playwright/test";
+import { chromium, webkit } from "@playwright/test";
 
 import {
   formatRedlineXml,
@@ -48,6 +48,8 @@ function startServer(handler) {
 let browser;
 let appServer;
 let crossOriginServer;
+// Responses to /hang.png, held open so a capture's fetch never finishes.
+const hangingResponses = [];
 
 before(async () => {
   crossOriginServer = await startServer((req, res) => {
@@ -81,6 +83,36 @@ before(async () => {
         "Content-Type": "application/javascript; charset=utf-8",
       });
       res.end(RUNTIME_SCRIPT);
+      return;
+    }
+    if (url.pathname === "/hang.png") {
+      hangingResponses.push(res);
+      return;
+    }
+    if (url.pathname === "/snap") {
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(`<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    body { margin: 0; font: 14px system-ui, sans-serif; background: rgb(15, 23, 42); color: #f8fafc; }
+    .card { margin: 12px; padding: 12px; border: 1px solid #475569; border-radius: 12px; }
+    .title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    #ext { display: block; margin: 12px; width: 120px; height: 80px; }
+    #spot { position: absolute; left: 0; top: 460px; width: 390px; height: 120px; }
+  </style>
+</head>
+<body>
+  <div class="card"><div class="title">A long rail card title that truncates at phone width with an ellipsis</div></div>
+  ${url.searchParams.get("ext") ? `<img id="ext" alt="Partner Logo" src="${crossOriginServer.url}/ext.png" />` : ""}
+  ${url.searchParams.get("hang") ? `<img id="hang" alt="" src="/hang.png" width="20" height="20" />` : ""}
+  ${url.searchParams.get("frame") ? `<iframe id="frame" title="Same-origin frame" srcdoc="<body style='margin:0;background:rgb(37,99,235)'></body>" style="position:absolute;left:200px;top:300px;width:150px;height:100px;border:0"></iframe>` : ""}
+  <div id="spot"></div>
+  <script src="/annotator.js"></script>
+</body>
+</html>`);
       return;
     }
     if (url.pathname === "/corner") {
@@ -173,6 +205,7 @@ before(async () => {
 });
 
 after(async () => {
+  for (const res of hangingResponses.splice(0)) res.destroy();
   await browser?.close();
   appServer?.server.close();
   crossOriginServer?.server.close();
@@ -1342,19 +1375,20 @@ test("Tightest layout-matrix zero-spill check (320x844, 390x844, 1280x800) with 
   }
 });
 
-test("DOM snapshot clips scrolled content, keeps sticky layers on top, skips opacity:0 subtrees and draws inline SVG icons", async () => {
-  const context = await browser.newContext({
-    viewport: { width: 393, height: 640 },
-    deviceScaleFactor: 1,
-  });
-  const page = await context.newPage();
-  try {
-    const cards = Array.from(
-      { length: 30 },
-      (_, i) =>
-        `<div style="position:relative;padding:10px;color:#fafafa">Card ${i}<br>Body text for card ${i}</div>`,
-    ).join("");
-    await page.setContent(`<!doctype html><html><head><style>
+for (const renderer of ["painter", "browser"]) {
+  test(`DOM snapshot (${renderer}) clips scrolled content, keeps sticky layers on top, skips opacity:0 subtrees and draws inline SVG icons`, async () => {
+    const context = await browser.newContext({
+      viewport: { width: 393, height: 640 },
+      deviceScaleFactor: 1,
+    });
+    const page = await context.newPage();
+    try {
+      const cards = Array.from(
+        { length: 30 },
+        (_, i) =>
+          `<div style="position:relative;padding:10px;color:#fafafa">Card ${i}<br>Body text for card ${i}</div>`,
+      ).join("");
+      await page.setContent(`<!doctype html><html><head><style>
       body { margin: 0; background: rgb(24, 24, 27); font: 13px sans-serif; }
       #icon { position: absolute; left: 10px; top: 110px; width: 48px; height: 48px; color: rgb(0, 200, 0); }
       #list { position: absolute; left: 72px; top: 100px; width: 321px; height: 400px; overflow-y: auto; }
@@ -1366,71 +1400,77 @@ test("DOM snapshot clips scrolled content, keeps sticky layers on top, skips opa
       <div id="list"><div id="head"></div>${cards}</div>
       <div id="ghost"><div></div></div>
     </body></html>`);
-    await page.addScriptTag({ content: RUNTIME_SCRIPT });
-    await page.evaluate(() => {
-      document.getElementById("list").scrollTop = 300;
-    });
-
-    const pixels = await page.evaluate(async () => {
-      const shot = window.__designKitAnnotate.captureCalloutSnapshot(null, {
-        document,
+      await page.addScriptTag({ content: RUNTIME_SCRIPT });
+      await page.evaluate(() => {
+        document.getElementById("list").scrollTop = 300;
       });
-      const img = new Image();
-      await new Promise((resolve) => {
-        img.onload = resolve;
-        img.src = shot.dataUrl;
-      });
-      const canvas = document.createElement("canvas");
-      canvas.width = img.naturalWidth;
-      canvas.height = img.naturalHeight;
-      const ctx = canvas.getContext("2d");
-      ctx.drawImage(img, 0, 0);
-      const region = (x, y, w, h) => {
-        const data = ctx.getImageData(x, y, w, h).data;
-        let bright = 0;
-        let red = 0;
-        let green = 0;
-        for (let i = 0; i < data.length; i += 4) {
-          const [r, g, b] = [data[i], data[i + 1], data[i + 2]];
-          if (r > 150 && g > 150 && b > 150) bright += 1;
-          if (r > 200 && g < 80 && b < 80) red += 1;
-          if (g > 150 && r < 80 && b < 80) green += 1;
-        }
-        return { bright, red, green };
-      };
-      return {
-        size: [canvas.width, canvas.height],
-        // The 40px sticky header, which the scrolled cards pass under.
-        header: region(72, 100, 321, 40),
-        // Above the list: cards scrolled out of it must not paint here.
-        aboveList: region(72, 0, 321, 100),
-        // The list's visible body: cards are painted.
-        body: region(72, 160, 321, 300),
-        // Where the opacity:0 subtree sits.
-        ghost: region(0, 520, 393, 100),
-        // The inline SVG icon's stroke.
-        icon: region(10, 110, 48, 48),
-      };
-    });
 
-    assert.deepEqual(pixels.size, [393, 640]);
-    assert.equal(
-      pixels.header.bright,
-      0,
-      "card text painted over the sticky header",
-    );
-    assert.equal(
-      pixels.aboveList.bright,
-      0,
-      "scrolled-out cards painted outside their scroller",
-    );
-    assert.ok(pixels.body.bright > 0, "visible cards were not painted");
-    assert.equal(pixels.ghost.red, 0, "an opacity:0 subtree was painted");
-    assert.ok(pixels.icon.green > 0, "the inline SVG icon was not painted");
-  } finally {
-    await context.close();
-  }
-});
+      const pixels = await page.evaluate(async (which) => {
+        const api = window.__designKitAnnotate;
+        const shot =
+          which === "browser"
+            ? await api.captureViewportSnapshot(null, { document })
+            : api.captureCalloutSnapshot(null, { document });
+        window.__shotRenderer = shot.renderer;
+        const img = new Image();
+        await new Promise((resolve) => {
+          img.onload = resolve;
+          img.src = shot.dataUrl;
+        });
+        const canvas = document.createElement("canvas");
+        canvas.width = img.naturalWidth;
+        canvas.height = img.naturalHeight;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(img, 0, 0);
+        const region = (x, y, w, h) => {
+          const data = ctx.getImageData(x, y, w, h).data;
+          let bright = 0;
+          let red = 0;
+          let green = 0;
+          for (let i = 0; i < data.length; i += 4) {
+            const [r, g, b] = [data[i], data[i + 1], data[i + 2]];
+            if (r > 150 && g > 150 && b > 150) bright += 1;
+            if (r > 200 && g < 80 && b < 80) red += 1;
+            if (g > 150 && r < 80 && b < 80) green += 1;
+          }
+          return { bright, red, green };
+        };
+        return {
+          size: [canvas.width, canvas.height],
+          // The 40px sticky header, which the scrolled cards pass under.
+          header: region(72, 100, 321, 40),
+          // Above the list: cards scrolled out of it must not paint here.
+          aboveList: region(72, 0, 321, 100),
+          // The list's visible body: cards are painted.
+          body: region(72, 160, 321, 300),
+          // Where the opacity:0 subtree sits.
+          ghost: region(0, 520, 393, 100),
+          // The inline SVG icon's stroke.
+          icon: region(10, 110, 48, 48),
+          renderer: window.__shotRenderer,
+        };
+      }, renderer);
+
+      assert.deepEqual(pixels.size, [393, 640]);
+      assert.equal(
+        pixels.header.bright,
+        0,
+        "card text painted over the sticky header",
+      );
+      assert.equal(
+        pixels.aboveList.bright,
+        0,
+        "scrolled-out cards painted outside their scroller",
+      );
+      assert.ok(pixels.body.bright > 0, "visible cards were not painted");
+      assert.equal(pixels.ghost.red, 0, "an opacity:0 subtree was painted");
+      assert.ok(pixels.icon.green > 0, "the inline SVG icon was not painted");
+      if (renderer === "browser") assert.equal(pixels.renderer, "browser");
+    } finally {
+      await context.close();
+    }
+  });
+}
 
 // Real touch emulation (hasTouch + CDP touch events, so Chromium generates
 // the pointer events and the trailing compatibility mouse events itself).
@@ -1751,3 +1791,571 @@ test("Phone: Undo and Copy toasts hide on their own and when a new mark starts, 
     await context.close();
   }
 });
+
+// Places one pin at (x, y) through the overlay and resolves the mark's
+// snapshot, decoded in the page: size, renderer and a pixel reader.
+async function pinAndReadSnapshot(page, x, y, probes) {
+  await page.mouse.click(x, y);
+  await page.waitForFunction(() => !!window.__snapCtrl.getItems()[0]?.snapshot);
+  return page.evaluate(async (points) => {
+    const getImageData =
+      window.__realGetImageData ||
+      CanvasRenderingContext2D.prototype.getImageData;
+    const shot = window.__snapCtrl.getItems()[0].snapshot;
+    const img = new Image();
+    await new Promise((resolve) => {
+      img.onload = resolve;
+      img.src = shot.dataUrl;
+    });
+    const canvas = document.createElement("canvas");
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(img, 0, 0);
+    const k = canvas.width / window.innerWidth;
+    const pixels = {};
+    for (const [name, [px, py]] of Object.entries(points || {})) {
+      pixels[name] = Array.from(
+        getImageData.call(ctx, Math.round(px * k), Math.round(py * k), 1, 1)
+          .data,
+      ).slice(0, 3);
+    }
+    return {
+      isPng: shot.dataUrl.startsWith("data:image/png;base64,"),
+      width: shot.width,
+      height: shot.height,
+      byteLength: shot.byteLength,
+      renderer: shot.renderer,
+      crossOriginPlaceholders: shot.crossOriginPlaceholders,
+      pixels,
+    };
+  }, probes);
+}
+
+function near(actual, expected, tolerance, label) {
+  for (let i = 0; i < 3; i += 1) {
+    assert.ok(
+      Math.abs(actual[i] - expected[i]) <= tolerance,
+      `${label}: got rgb(${actual.join(", ")}), expected about rgb(${expected.join(", ")})`,
+    );
+  }
+}
+
+test("Browser-rendered snapshot at DPR 3 stays within 1 MiB, is wider than the CSS viewport, and draws the pin once", async () => {
+  const context = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    deviceScaleFactor: 3,
+  });
+  const page = await context.newPage();
+  try {
+    await page.goto(`${appServer.url}/snap`);
+    await page.evaluate(() => {
+      window.__snapCtrl = window.__designKitAnnotate.mountAnnotator({
+        initialMode: "annotate",
+        initialTool: "pin",
+        storageKey: false,
+      });
+    });
+    const shot = await pinAndReadSnapshot(page, 200, 400, {
+      // Inside the pin's 16px halo, outside its badge: page background with
+      // one 25% red wash, so neither the overlay's own marker nor a second
+      // callout is in the image.
+      halo: [214, 400],
+      page: [200, 600],
+    });
+    assert.equal(shot.renderer, "browser");
+    assert.ok(shot.isPng);
+    assert.ok(shot.byteLength > 0 && shot.byteLength <= MAX_SNAPSHOT_BYTES);
+    assert.ok(shot.width > 390, `expected wider than 390, got ${shot.width}`);
+    assert.equal(shot.width, 1170);
+    assert.equal(shot.height, 2532);
+    near(shot.pixels.page, [15, 23, 42], 3, "page background");
+    near(shot.pixels.halo, [71, 34, 48], 8, "pin halo");
+  } finally {
+    await context.close();
+  }
+});
+
+for (const failure of ["throw", "taint", "timeout"]) {
+  test(`Forced rasterizer ${failure} falls back to the hand painter and the mark still has an image`, async () => {
+    const context = await browser.newContext({
+      viewport: { width: 390, height: 844 },
+      deviceScaleFactor: 2,
+    });
+    const page = await context.newPage();
+    try {
+      // /hang.png never loads, so do not wait for the load event.
+      await page.goto(
+        `${appServer.url}/snap${failure === "timeout" ? "?hang=1" : ""}`,
+        { waitUntil: "domcontentloaded" },
+      );
+      await page.evaluate((kind) => {
+        if (kind === "throw") {
+          XMLSerializer.prototype.serializeToString = () => {
+            throw new Error("forced rasterizer failure");
+          };
+        }
+        if (kind === "taint") {
+          window.__realGetImageData =
+            CanvasRenderingContext2D.prototype.getImageData;
+          CanvasRenderingContext2D.prototype.getImageData = () => {
+            throw new DOMException("tainted", "SecurityError");
+          };
+        }
+        window.__snapCtrl = window.__designKitAnnotate.mountAnnotator({
+          initialMode: "annotate",
+          initialTool: "pin",
+          storageKey: false,
+          // The same-origin /hang.png never answers, so the capture's fetch
+          // of it outlives this deadline.
+          snapshotTimeoutMs: kind === "timeout" ? 300 : undefined,
+        });
+      }, failure);
+      const shot = await pinAndReadSnapshot(page, 200, 400, {
+        page: [200, 600],
+      });
+      assert.equal(shot.renderer, "painter");
+      assert.ok(shot.isPng);
+      assert.ok(shot.byteLength > 0 && shot.byteLength <= MAX_SNAPSHOT_BYTES);
+      // The painter draws at CSS pixels.
+      assert.equal(shot.width, 390);
+      near(shot.pixels.page, [15, 23, 42], 3, "painted background");
+    } finally {
+      await context.close();
+    }
+  });
+}
+
+test("Browser-rendered snapshot replaces a cross-origin image with a labelled placeholder, without a SecurityError", async () => {
+  const context = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    deviceScaleFactor: 2,
+  });
+  const page = await context.newPage();
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  try {
+    await page.goto(`${appServer.url}/snap?ext=1`);
+    await page.waitForFunction(
+      () => document.getElementById("ext")?.complete === true,
+    );
+    const ext = await page.locator("#ext").boundingBox();
+    await page.evaluate(() => {
+      window.__snapCtrl = window.__designKitAnnotate.mountAnnotator({
+        initialMode: "annotate",
+        initialTool: "pin",
+        storageKey: false,
+      });
+    });
+    // The pin's target is #spot, so its wash stays off the image.
+    const shot = await pinAndReadSnapshot(page, 200, 500, {
+      placeholder: [ext.x + 4, ext.y + 4],
+    });
+    assert.equal(shot.renderer, "browser");
+    assert.ok(shot.crossOriginPlaceholders >= 1);
+    // The placeholder's fill, not the (transparent) external image.
+    near(shot.pixels.placeholder, [39, 39, 42], 4, "placeholder fill");
+    assert.deepEqual(errors, []);
+  } finally {
+    await context.close();
+  }
+});
+
+test("Host captureScreenshot: the overlay is hidden from the host image, callouts are drawn on it once, at its own resolution", async () => {
+  const context = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    deviceScaleFactor: 2,
+  });
+  const page = await context.newPage();
+  try {
+    // A real screenshot of the page as it is painted when the host captures.
+    await page.exposeFunction("__nativeShot", async () => {
+      const png = await page.screenshot();
+      return `data:image/png;base64,${png.toString("base64")}`;
+    });
+    await page.goto(`${appServer.url}/snap`);
+    await page.evaluate(() => {
+      window.__hostCalls = [];
+      window.__snapCtrl = window.__designKitAnnotate.mountAnnotator({
+        initialMode: "annotate",
+        initialTool: "pin",
+        storageKey: false,
+        captureScreenshot: (context) => {
+          window.__hostCalls.push(
+            context.overlay.tagName.toLowerCase() === "design-kit-annotator",
+          );
+          return window.__nativeShot();
+        },
+      });
+    });
+    // Two marks: the first is on screen when the second is captured.
+    await page.mouse.click(120, 300);
+    await page.waitForFunction(
+      () => !!window.__snapCtrl.getItems()[0]?.snapshot,
+    );
+    // Close the first note so the second click lands on the page.
+    await page.keyboard.press("Escape");
+    await page.mouse.click(260, 400);
+    await page.waitForFunction(
+      () =>
+        window.__snapCtrl.getItems().length === 2 &&
+        !!window.__snapCtrl.getItems()[1]?.snapshot,
+    );
+    const result = await page.evaluate(async () => {
+      const shot = window.__snapCtrl.getItems()[1].snapshot;
+      const img = new Image();
+      await new Promise((resolve) => {
+        img.onload = resolve;
+        img.src = shot.dataUrl;
+      });
+      const canvas = document.createElement("canvas");
+      canvas.width = img.naturalWidth;
+      canvas.height = img.naturalHeight;
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(img, 0, 0);
+      const k = canvas.width / window.innerWidth;
+      const at = (x, y) =>
+        Array.from(
+          ctx.getImageData(Math.round(x * k), Math.round(y * k), 1, 1).data,
+        ).slice(0, 3);
+      const host = document.querySelector("design-kit-annotator");
+      return {
+        renderer: shot.renderer,
+        width: shot.width,
+        calls: window.__hostCalls,
+        hostOpacity: host.style.opacity,
+        halo1: at(134, 300),
+        halo2: at(274, 400),
+        page: at(200, 700),
+      };
+    });
+    assert.deepEqual(result.calls, [true, true]);
+    assert.equal(result.renderer, "host");
+    assert.equal(result.width, 780, "the host image keeps device pixels");
+    assert.equal(result.hostOpacity, "", "the overlay shows again");
+    near(result.page, [15, 23, 42], 3, "page background");
+    // Both pins' halos carry exactly one 25% wash: the first mark's on-screen
+    // marker was hidden from the host image, and each callout drawn once.
+    near(result.halo1, [71, 34, 48], 8, "first pin halo");
+    near(result.halo2, [71, 34, 48], 8, "second pin halo");
+  } finally {
+    await context.close();
+  }
+});
+
+test("Send to Fix waits for snapshots still being taken, including a mark made while it waits", async () => {
+  const context = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+  });
+  const page = await context.newPage();
+  try {
+    await page.goto(`${appServer.url}/snap`);
+    await page.evaluate(() => {
+      window.__pendingShots = [];
+      window.__sent = [];
+      window.__snapCtrl = window.__designKitAnnotate.mountAnnotator({
+        initialMode: "annotate",
+        initialTool: "pin",
+        storageKey: false,
+        // Native captures that stay pending until the test releases them.
+        captureScreenshot: () =>
+          new Promise((resolve) => window.__pendingShots.push(resolve)),
+        onSubmit: async (packet) => {
+          window.__sent.push(packet);
+          return { message: "ok" };
+        },
+      });
+    });
+    await page.mouse.click(120, 300);
+    await page.keyboard.press("Escape");
+    const send = await page.evaluate(() =>
+      window.__snapCtrl.getControlRect("send-fix"),
+    );
+    await page.mouse.click(send.centerX, send.centerY);
+    // Mark B arrives while Send is waiting on mark A's capture.
+    await page.mouse.click(260, 400);
+    await page.waitForFunction(() => window.__pendingShots.length === 2);
+    assert.equal(await page.evaluate(() => window.__sent.length), 0);
+    await page.evaluate(() => {
+      for (const release of window.__pendingShots.splice(0)) release(null);
+    });
+    await page.waitForFunction(() => window.__sent.length === 1);
+    const items = await page.evaluate(() =>
+      window.__sent[0].items.map((it) => ({
+        kind: it.kind,
+        hasSnapshot: !!it.snapshot?.dataUrl,
+      })),
+    );
+    assert.equal(items.length, 2);
+    assert.ok(
+      items.every((it) => it.hasSnapshot),
+      `every sent mark has its image: ${JSON.stringify(items)}`,
+    );
+  } finally {
+    await context.close();
+  }
+});
+
+test("A mark whose capture finishes after the overlay closes keeps its image when the queue is restored", async () => {
+  const context = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+  });
+  const page = await context.newPage();
+  try {
+    await page.goto(`${appServer.url}/snap`);
+    await page.evaluate(() => {
+      window.__pendingShots = [];
+      window.__first = window.__designKitAnnotate.mountAnnotator({
+        initialMode: "annotate",
+        initialTool: "pin",
+        storageKey: "dk-test-restore",
+        captureScreenshot: () =>
+          new Promise((resolve) => window.__pendingShots.push(resolve)),
+      });
+    });
+    await page.mouse.click(200, 300);
+    await page.waitForFunction(() => window.__pendingShots.length === 1);
+    await page.evaluate(() => {
+      window.__first.destroy();
+      // A newer overlay's queue must survive the late write.
+      const stored = JSON.parse(sessionStorage.getItem("dk-test-restore"));
+      stored.push({ ...stored[0], id: "newer-mark", snapshot: undefined });
+      sessionStorage.setItem("dk-test-restore", JSON.stringify(stored));
+      window.__pendingShots.splice(0)[0](null);
+    });
+    await page.waitForFunction(() => {
+      const stored = JSON.parse(sessionStorage.getItem("dk-test-restore"));
+      return !!stored?.[0]?.snapshot?.dataUrl;
+    });
+    const restored = await page.evaluate(() => {
+      const ctrl = window.__designKitAnnotate.mountAnnotator({
+        storageKey: "dk-test-restore",
+      });
+      const items = ctrl.getItems();
+      ctrl.destroy();
+      return items.map((it) => ({ id: it.id, hasSnapshot: !!it.snapshot }));
+    });
+    assert.equal(restored.length, 2);
+    assert.equal(restored[0].hasSnapshot, true);
+    assert.equal(restored[1].id, "newer-mark");
+  } finally {
+    await context.close();
+  }
+});
+
+test("A mark whose capture finishes after the overlay is closed and reopened gets its image in the reopened overlay", async () => {
+  const context = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+  });
+  const page = await context.newPage();
+  try {
+    await page.goto(`${appServer.url}/snap`);
+    await page.evaluate(() => {
+      window.__pendingShots = [];
+      window.__first = window.__designKitAnnotate.mountAnnotator({
+        initialMode: "annotate",
+        initialTool: "pin",
+        storageKey: "dk-test-reopen",
+        captureScreenshot: () =>
+          new Promise((resolve) => window.__pendingShots.push(resolve)),
+      });
+    });
+    await page.mouse.click(200, 300);
+    await page.waitForFunction(() => window.__pendingShots.length === 1);
+    await page.evaluate(() => {
+      window.__first.destroy();
+      // Reopened before the first overlay's capture finishes.
+      window.__second = window.__designKitAnnotate.mountAnnotator({
+        initialMode: "browse",
+        storageKey: "dk-test-reopen",
+      });
+      window.__pendingShots.splice(0)[0](null);
+    });
+    await page.waitForFunction(
+      () => !!window.__second.getItems()[0]?.snapshot?.dataUrl,
+    );
+    const stored = await page.evaluate(() => {
+      // A later save from the reopened overlay keeps the image.
+      window.__second.setMode("annotate");
+      window.__second.setMode("browse");
+      return JSON.parse(sessionStorage.getItem("dk-test-reopen"));
+    });
+    assert.equal(stored.length, 1);
+    assert.ok(stored[0].snapshot?.dataUrl, "stored mark keeps its image");
+  } finally {
+    await context.close();
+  }
+});
+
+test("Send in a reopened overlay waits for a snapshot the closed overlay is still taking", async () => {
+  const context = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+  });
+  const page = await context.newPage();
+  try {
+    await page.goto(`${appServer.url}/snap`);
+    await page.evaluate(() => {
+      window.__pendingShots = [];
+      window.__sent = [];
+      window.__first = window.__designKitAnnotate.mountAnnotator({
+        initialMode: "annotate",
+        initialTool: "pin",
+        storageKey: "dk-test-reopen-send",
+        captureScreenshot: () =>
+          new Promise((resolve) => window.__pendingShots.push(resolve)),
+      });
+    });
+    await page.mouse.click(200, 300);
+    await page.waitForFunction(() => window.__pendingShots.length === 1);
+    await page.evaluate(() => {
+      window.__first.destroy();
+      window.__second = window.__designKitAnnotate.mountAnnotator({
+        initialMode: "browse",
+        storageKey: "dk-test-reopen-send",
+        onSubmit: async (packet) => {
+          window.__sent.push(packet);
+          return { message: "ok" };
+        },
+      });
+      window.__sending = window.__second.submitFix();
+    });
+    assert.equal(await page.evaluate(() => window.__sent.length), 0);
+    await page.evaluate(() => window.__pendingShots.splice(0)[0](null));
+    await page.waitForFunction(() => window.__sent.length === 1);
+    const items = await page.evaluate(() =>
+      window.__sent[0].items.map((it) => !!it.snapshot?.dataUrl),
+    );
+    assert.deepEqual(items, [true]);
+  } finally {
+    await context.close();
+  }
+});
+
+// WebKit dropped a same-origin frame from snapshots drawn above 1x, so this
+// runs in both engines. CI installs both for these tests.
+for (const [engineName, engine] of [
+  ["chromium", chromium],
+  ["webkit", webkit],
+]) {
+  test(`A same-origin frame is rendered into the DPR 3 snapshot in ${engineName}`, async () => {
+    const engineBrowser =
+      engineName === "chromium" ? browser : await engine.launch();
+    const context = await engineBrowser.newContext({
+      viewport: { width: 390, height: 844 },
+      deviceScaleFactor: 3,
+    });
+    const page = await context.newPage();
+    try {
+      await page.goto(`${appServer.url}/snap?frame=1`);
+      await page.evaluate(() => {
+        window.__snapCtrl = window.__designKitAnnotate.mountAnnotator({
+          initialMode: "annotate",
+          initialTool: "pin",
+          storageKey: false,
+        });
+      });
+      const shot = await pinAndReadSnapshot(page, 100, 500, {
+        frame: [275, 350],
+        page: [100, 250],
+      });
+      assert.equal(shot.renderer, "browser");
+      assert.equal(shot.width, 1170);
+      near(shot.pixels.frame, [37, 99, 235], 3, "frame content");
+      near(shot.pixels.page, [15, 23, 42], 3, "page background");
+    } finally {
+      await context.close();
+      if (engineBrowser !== browser) await engineBrowser.close();
+    }
+  });
+}
+
+// WebKit draws a raster over about 131,072 pixels blank inside an SVG image
+// unless it is decoded synchronously, so this also runs in both engines.
+for (const [engineName, engine] of [
+  ["chromium", chromium],
+  ["webkit", webkit],
+]) {
+  test(`Large raster images and CSS backgrounds stay in the DPR 3 snapshot in ${engineName}`, async () => {
+    const engineBrowser =
+      engineName === "chromium" ? browser : await engine.launch();
+    const context = await engineBrowser.newContext({
+      viewport: { width: 390, height: 844 },
+      deviceScaleFactor: 3,
+    });
+    const page = await context.newPage();
+    try {
+      await page.goto(`${appServer.url}/snap`);
+      await page.evaluate(async () => {
+        const canvas = document.createElement("canvas");
+        canvas.width = 700;
+        canvas.height = 700;
+        const ctx = canvas.getContext("2d");
+        ctx.fillStyle = "rgb(0, 160, 0)";
+        ctx.fillRect(0, 0, 700, 700);
+        const dataUrl = canvas.toDataURL("image/png");
+        const blobUrl = URL.createObjectURL(
+          await new Promise((resolve) => canvas.toBlob(resolve, "image/png")),
+        );
+        const place = (el, left, top) => {
+          el.style.cssText += `;position:absolute;left:${left}px;top:${top}px;width:180px;height:150px;margin:0`;
+          document.body.appendChild(el);
+        };
+        const img = new Image();
+        img.src = dataUrl;
+        await img.decode();
+        place(img, 0, 100);
+        const dataBg = document.createElement("div");
+        dataBg.style.background = `url("${dataUrl}") 0 0 / 100% 100%`;
+        place(dataBg, 200, 100);
+        const blobBg = document.createElement("div");
+        blobBg.style.background = `url("${blobUrl}") 0 0 / 100% 100%`;
+        place(blobBg, 0, 280);
+        const liveCanvas = document.createElement("canvas");
+        liveCanvas.width = 700;
+        liveCanvas.height = 700;
+        // Its own colour, so its data URL is not one already decoded.
+        const liveCtx = liveCanvas.getContext("2d");
+        liveCtx.fillStyle = "rgb(0, 0, 160)";
+        liveCtx.fillRect(0, 0, 700, 700);
+        place(liveCanvas, 200, 280);
+        // Just over WebKit's limit, so a downscale threshold set too high
+        // shows here.
+        const near = document.createElement("canvas");
+        near.width = 400;
+        near.height = 400;
+        const nearCtx = near.getContext("2d");
+        nearCtx.fillStyle = "rgb(160, 0, 160)";
+        nearCtx.fillRect(0, 0, 400, 400);
+        const nearBg = document.createElement("div");
+        nearBg.style.background = `url("${near.toDataURL("image/png")}") 0 0 / 100% 100%`;
+        place(nearBg, 200, 640);
+        window.__snapCtrl = window.__designKitAnnotate.mountAnnotator({
+          initialMode: "annotate",
+          initialTool: "pin",
+          storageKey: false,
+        });
+      });
+      const shot = await pinAndReadSnapshot(page, 100, 500, {
+        img: [90, 175],
+        dataBg: [290, 175],
+        blobBg: [90, 355],
+        liveCanvas: [290, 355],
+        nearBg: [290, 715],
+      });
+      assert.equal(shot.renderer, "browser");
+      near(shot.pixels.img, [0, 160, 0], 3, "large <img>");
+      near(shot.pixels.dataBg, [0, 160, 0], 3, "large data: background");
+      near(shot.pixels.blobBg, [0, 160, 0], 3, "large blob: background");
+      near(shot.pixels.liveCanvas, [0, 0, 160], 3, "large <canvas>");
+      near(
+        shot.pixels.nearBg,
+        [160, 0, 160],
+        3,
+        "background just over the limit",
+      );
+    } finally {
+      await context.close();
+      if (engineBrowser !== browser) await engineBrowser.close();
+    }
+  });
+}
